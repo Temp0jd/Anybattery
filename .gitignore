@@ -1,0 +1,17 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Build artifacts (published via GitHub Releases)
+/release/
+
+# Local agent/session state
+/.pi
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local config
+/data
+portable.txt

@@ -1,0 +1,24 @@
+[package]
+name = "anybattery-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "AnyBattery"
+path = "src/main.rs"
+
+[dependencies]
+anybattery-core.workspace = true
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow"] }
+tray-icon = "0.26"
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+crossbeam-channel.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+anybattery-windows = { path = "../anybattery-windows" }
