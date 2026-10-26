@@ -2,7 +2,7 @@ use anybattery_core::{now_unix, BatteryStatus, DeviceSnapshot, Settings, Theme};
 use anybattery_windows::{scan, ScanResult, system};
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use eframe::egui::{
-    self, Align, Align2, CornerRadius, FontId, Id, Layout, Pos2, Rect, RichText, Sense, Stroke,
+    self, Align, Align2, CornerRadius, FontId, Layout, Pos2, Rect, RichText, Sense, Stroke,
     StrokeKind, Ui, UiBuilder, ViewportCommand, vec2,
 };
 use std::sync::{Arc, Mutex};
@@ -329,54 +329,41 @@ impl AnyBatteryApp {
             self.applied_dark = Some(dark);
             self.applied_animations = Some(self.settings.animations);
             theme::apply_visuals(ctx, theme::palette(dark), self.settings.animations);
+            ctx.send_viewport_cmd(ViewportCommand::SetTheme(if dark {
+                egui::SystemTheme::Dark
+            } else {
+                egui::SystemTheme::Light
+            }));
         }
     }
 
     fn paint_background(&self, ui: &mut Ui, p: &Palette) {
         let rect = ui.max_rect();
         let painter = ui.painter();
-        painter.rect_filled(rect, CornerRadius::same(22), p.bg);
-        painter.rect_filled(
-            Rect::from_min_size(rect.min, vec2(rect.width(), 120.0)),
-            CornerRadius { nw: 22, ne: 22, sw: 0, se: 0 },
-            p.bg_glow,
-        );
+        painter.rect_filled(rect, CornerRadius::ZERO, p.bg);
+        let strip = Rect::from_min_size(rect.min, vec2(rect.width(), 112.0));
+        painter.rect_filled(strip, CornerRadius::ZERO, p.bg_glow);
+        // Dithered seam, like a printed cartridge label.
+        let mut x = rect.left() + 4.0;
+        while x < rect.right() {
+            painter.rect_filled(
+                Rect::from_min_size(Pos2::new(x, strip.bottom() - 4.0), vec2(2.0, 2.0)),
+                CornerRadius::ZERO,
+                p.card_border.gamma_multiply(0.45),
+            );
+            x += 6.0;
+        }
         painter.rect_stroke(
-            rect.shrink(0.5),
-            CornerRadius::same(22),
-            Stroke::new(1.0, p.card_border),
+            rect.shrink(1.0),
+            CornerRadius::ZERO,
+            Stroke::new(2.0, p.card_border),
             StrokeKind::Inside,
         );
     }
 
     fn header(&mut self, ui: &mut Ui, p: &Palette) {
-        let ctx = ui.ctx().clone();
         let width = ui.available_width();
         let (bar, _) = ui.allocate_exact_size(vec2(width, 34.0), Sense::hover());
-        let mut left = ui.new_child(
-            UiBuilder::new()
-                .max_rect(Rect::from_min_size(bar.min, vec2(90.0, bar.height())))
-                .layout(Layout::left_to_right(Align::Center)),
-        );
-        if let Some(glyph) = widgets::traffic_lights(&mut left, p) {
-            match glyph {
-                widgets::Glyph::Close => self.hide(&ctx),
-                widgets::Glyph::Minimize => ctx.send_viewport_cmd(ViewportCommand::Minimized(true)),
-                widgets::Glyph::Zoom => {
-                    let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
-                    ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized));
-                }
-                _ => {}
-            }
-        }
-        let drag_rect = Rect::from_min_max(
-            Pos2::new(bar.left() + 92.0, bar.top()),
-            Pos2::new(bar.right() - 82.0, bar.bottom()),
-        );
-        let drag = ui.interact(drag_rect, Id::new("titlebar.drag"), Sense::click_and_drag());
-        if drag.drag_started() {
-            ctx.send_viewport_cmd(ViewportCommand::StartDrag);
-        }
         let mut right = ui.new_child(
             UiBuilder::new()
                 .max_rect(Rect::from_min_size(
@@ -406,7 +393,7 @@ impl AnyBatteryApp {
                         if self.scanning {
                             "正在扫描设备…".to_owned()
                         } else {
-                            "未发现可读取电量的设备".to_owned()
+                            "未发现带电池的设备".to_owned()
                         }
                     } else {
                         format!(
@@ -422,9 +409,9 @@ impl AnyBatteryApp {
                 Page::Diagnostics => ("诊断".to_owned(), "扫描结果与设备接口".to_owned()),
             };
             ui.vertical(|ui| {
-                ui.label(theme::rich(title, 27.0, p.text, true));
+                ui.label(theme::rich(title, 24.0, p.text, true));
                 ui.add_space(1.0);
-                ui.label(theme::rich(subtitle, 11.5, p.secondary, false));
+                ui.label(theme::rich(subtitle, 12.0, p.secondary, false));
             });
         });
     }
@@ -435,17 +422,18 @@ impl AnyBatteryApp {
             if let Some(alert) = &self.alert {
                 let width = ui.available_width();
                 let (rect, _) = ui.allocate_exact_size(vec2(width, 34.0), Sense::hover());
-                ui.painter().rect_filled(rect, CornerRadius::same(10), p.orange.gamma_multiply(0.14));
-                ui.painter().circle_filled(
-                    Pos2::new(rect.left() + 16.0, rect.center().y),
-                    4.0,
+                icons::draw_pixel_shadow(ui.painter(), rect, p.shadow);
+                icons::pixel_frame(ui.painter(), rect, p.orange.gamma_multiply(0.18), p.card_border);
+                ui.painter().rect_filled(
+                    Rect::from_min_size(Pos2::new(rect.left() + 10.0, rect.center().y - 4.0), vec2(8.0, 8.0)),
+                    CornerRadius::ZERO,
                     p.orange,
                 );
                 ui.painter().text(
                     Pos2::new(rect.left() + 28.0, rect.center().y),
                     Align2::LEFT_CENTER,
                     widgets::truncate(alert, 40),
-                    FontId::new(11.5, egui::FontFamily::Proportional),
+                    FontId::new(12.0, egui::FontFamily::Proportional),
                     p.orange,
                 );
                 ui.add_space(8.0);
@@ -612,18 +600,9 @@ impl AnyBatteryApp {
                             self.toast("无法修改开机自启（注册表被拒绝）".to_owned());
                         }
                     }
-                    let mut active_ble = self.settings.active_ble;
-                    let mut changed = false;
-                    widgets::settings_row(ui, p, "主动读取 BLE 电量", "仅对已配对设备，10 分钟限流", |ui| {
-                        changed = widgets::toggle(ui, p, &mut active_ble);
-                    });
-                    if changed {
-                        self.settings.active_ble = active_ble;
-                        self.save_settings();
-                    }
                     let mut show_unknown = self.settings.show_unknown;
                     let mut changed = false;
-                    widgets::settings_row(ui, p, "显示未识别设备", "已连接但读不到电量时也列出", |ui| {
+                    widgets::settings_row(ui, p, "显示无电池设备", "没有电量或未匹配协议时也列出", |ui| {
                         changed = widgets::toggle(ui, p, &mut show_unknown);
                     });
                     if changed {
@@ -685,8 +664,8 @@ impl AnyBatteryApp {
         let height = (ui.available_height() - 12.0).max(80.0);
         egui::Frame::new()
             .fill(p.card)
-            .stroke(Stroke::new(1.0, p.card_border))
-            .corner_radius(CornerRadius::same(14))
+            .stroke(Stroke::new(2.0, p.card_border))
+            .corner_radius(CornerRadius::ZERO)
             .inner_margin(egui::Margin::symmetric(12, 10))
             .show(ui, |ui| {
                 egui::ScrollArea::vertical()
@@ -698,7 +677,7 @@ impl AnyBatteryApp {
                         for line in &self.diagnostics {
                             ui.label(
                                 RichText::new(line)
-                                    .size(10.2)
+                                    .size(12.0)
                                     .color(p.secondary)
                                     .monospace(),
                             );
@@ -721,18 +700,13 @@ impl AnyBatteryApp {
             Pos2::new(rect.center().x, rect.bottom() - 58.0),
             vec2(width, 32.0),
         );
-        ui.painter().rect_filled(toast, CornerRadius::same(9), p.card_solid);
-        ui.painter().rect_stroke(
-            toast,
-            CornerRadius::same(9),
-            Stroke::new(1.0, p.card_border),
-            StrokeKind::Inside,
-        );
+        icons::draw_pixel_shadow(ui.painter(), toast, p.shadow);
+        icons::pixel_frame(ui.painter(), toast, p.card_solid, p.card_border);
         ui.painter().text(
             toast.center(),
             Align2::CENTER_CENTER,
             widgets::truncate(message, 32),
-            FontId::new(11.0, egui::FontFamily::Proportional),
+            FontId::new(12.0, egui::FontFamily::Proportional),
             p.text,
         );
     }
@@ -740,7 +714,13 @@ impl AnyBatteryApp {
 
 impl eframe::App for AnyBatteryApp {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        [0.0, 0.0, 0.0, 0.0]
+        let p = theme::palette(self.dark);
+        [
+            p.bg.r() as f32 / 255.0,
+            p.bg.g() as f32 / 255.0,
+            p.bg.b() as f32 / 255.0,
+            1.0,
+        ]
     }
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -786,30 +766,29 @@ impl eframe::App for AnyBatteryApp {
 }
 
 fn empty_state(ui: &mut Ui, p: &Palette, scanning: bool) {
-    ui.add_space(52.0);
+    ui.add_space(48.0);
     ui.vertical_centered(|ui| {
-        let (rect, _) = ui.allocate_exact_size(vec2(72.0, 72.0), Sense::hover());
-        let center = rect.center();
-        ui.painter().circle_filled(center, 32.0, p.control);
-        ui.painter().circle_stroke(center, 22.0, Stroke::new(4.0, p.track));
+        let (rect, _) = ui.allocate_exact_size(vec2(64.0, 64.0), Sense::hover());
+        icons::draw_pixel_shadow(ui.painter(), rect, p.shadow);
+        icons::pixel_frame(ui.painter(), rect, p.card, p.card_border);
         ui.painter().text(
-            center,
+            rect.center(),
             Align2::CENTER_CENTER,
-            "—",
-            FontId::new(20.0, egui::FontFamily::Name("bold".into())),
+            "?",
+            FontId::new(30.0, egui::FontFamily::Name("bold".into())),
             p.tertiary,
         );
-        ui.add_space(12.0);
+        ui.add_space(14.0);
         ui.label(theme::rich(
-            if scanning { "正在扫描设备…" } else { "未发现可读取电量的设备" },
-            15.0,
+            if scanning { "正在扫描设备…" } else { "未发现带电池的设备" },
+            18.0,
             p.text,
             true,
         ));
         ui.add_space(4.0);
         ui.label(theme::rich(
-            "插入蓝牙或 2.4G 设备；仍无数据时打开诊断查看已识别接口",
-            11.0,
+            "插入蓝牙或 2.4G 设备；有线设备不会显示",
+            12.0,
             p.secondary,
             false,
         ));

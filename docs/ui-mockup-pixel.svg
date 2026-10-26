@@ -1,0 +1,124 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="430" height="680" viewBox="0 0 430 680" font-family="DejaVu Sans Mono, monospace">
+  <rect width="430" height="680" fill="#D8D1BF"/>
+  <rect x="14" y="12" width="402" height="656" fill="#2E2B26"/>
+  <rect x="17" y="15" width="396" height="650" fill="#E8E2D4"/>
+
+  <!-- native Windows title bar -->
+  <rect x="17" y="15" width="396" height="40" fill="#F4EFE4"/>
+  <rect x="17" y="53" width="396" height="2" fill="#2E2B26"/>
+  <text x="30" y="40" fill="#2E2B26" font-size="13" font-weight="bold">AnyBattery</text>
+  <!-- Windows caption buttons: minimize / maximize / close -->
+  <path d="M344 35h10" stroke="#2E2B26" stroke-width="2"/>
+  <rect x="366" y="29" width="10" height="10" fill="none" stroke="#2E2B26" stroke-width="2"/>
+  <path d="M394 29l8 8M402 29l-8 8" stroke="#2E2B26" stroke-width="2"/>
+  <!-- app toolbar: refresh / settings -->
+  <rect x="330" y="70" width="28" height="24" fill="#E3DCCB" stroke="#2E2B26" stroke-width="2"/>
+  <text x="344" y="86" text-anchor="middle" fill="#2E2B26" font-size="12" font-weight="bold">R</text>
+  <rect x="366" y="70" width="28" height="24" fill="#E3DCCB" stroke="#2E2B26" stroke-width="2"/>
+  <text x="380" y="86" text-anchor="middle" fill="#2E2B26" font-size="12" font-weight="bold">S</text>
+
+  <!-- title -->
+  <text x="34" y="88" fill="#2E2B26" font-size="28" font-weight="bold" letter-spacing="1">电池</text>
+  <text x="34" y="108" fill="#6F6A5E" font-size="12">4 台设备 / 蓝牙 1 / 2.4G 2 / 手柄 1</text>
+
+  <!-- alert -->
+  <rect x="30" y="122" width="370" height="34" fill="#F0C36A" stroke="#2E2B26" stroke-width="2"/>
+  <rect x="40" y="132" width="12" height="12" fill="#C8443C"/>
+  <text x="60" y="143" fill="#2E2B26" font-size="12" font-weight="bold">XBOX 手柄 电量低 18% / 建议充电</text>
+
+  <!-- tabs -->
+  <rect x="30" y="170" width="370" height="34" fill="#E3DCCB" stroke="#2E2B26" stroke-width="2"/>
+  <rect x="32" y="172" width="90" height="30" fill="#C8443C"/>
+  <text x="77" y="192" text-anchor="middle" fill="#F4EFE4" font-size="12" font-weight="bold">全部</text>
+  <text x="170" y="192" text-anchor="middle" fill="#6F6A5E" font-size="12">蓝牙</text>
+  <text x="262" y="192" text-anchor="middle" fill="#6F6A5E" font-size="12">2.4G</text>
+  <text x="355" y="192" text-anchor="middle" fill="#6F6A5E" font-size="12">手柄</text>
+
+  <!-- card 1 -->
+  <rect x="34" y="222" width="366" height="78" fill="#2E2B26"/>
+  <rect x="30" y="218" width="366" height="78" fill="#F4EFE4" stroke="#2E2B26" stroke-width="2"/>
+  <rect x="42" y="230" width="32" height="32" fill="#C8443C" stroke="#2E2B26" stroke-width="2"/>
+  <rect x="51" y="236" width="14" height="20" fill="none" stroke="#F4EFE4" stroke-width="2"/>
+  <path d="M58 238v6M51 244h14" stroke="#F4EFE4" stroke-width="2"/>
+  <text x="86" y="242" fill="#2E2B26" font-size="13" font-weight="bold">雷蛇 炼狱蝰蛇 V3 PRO</text>
+  <text x="86" y="262" fill="#6F6A5E" font-size="12">2.4G / 刚刚 / 已验证</text>
+  <text x="382" y="246" text-anchor="end" fill="#2E2B26" font-size="24" font-weight="bold">62%</text>
+  <g fill="#C8443C">
+    <rect x="324" y="258" width="8" height="12"/><rect x="334" y="258" width="8" height="12"/>
+    <rect x="344" y="258" width="8" height="12"/><rect x="354" y="258" width="8" height="12"/>
+    <rect x="364" y="258" width="8" height="12"/>
+  </g>
+  <g fill="#C9C1AE">
+    <rect x="374" y="258" width="8" height="12"/>
+  </g>
+  <rect x="324" y="270" width="58" height="2" fill="#2E2B26"/>
+
+  <!-- card 2 -->
+  <rect x="34" y="314" width="366" height="78" fill="#2E2B26"/>
+  <rect x="30" y="310" width="366" height="78" fill="#F4EFE4" stroke="#2E2B26" stroke-width="2"/>
+  <rect x="42" y="322" width="32" height="32" fill="#4F8A5B" stroke="#2E2B26" stroke-width="2"/>
+  <rect x="48" y="330" width="20" height="14" fill="none" stroke="#F4EFE4" stroke-width="2"/>
+  <path d="M54 334v6M51 337h6" stroke="#F4EFE4" stroke-width="2"/>
+  <text x="86" y="334" fill="#2E2B26" font-size="13" font-weight="bold">STEAM CONTROLLER</text>
+  <text x="86" y="354" fill="#6F6A5E" font-size="12">2.4G PUCK / 充电中 / 已验证</text>
+  <text x="382" y="338" text-anchor="end" fill="#2E2B26" font-size="24" font-weight="bold">85%</text>
+  <g fill="#4F8A5B">
+    <rect x="324" y="350" width="8" height="12"/><rect x="334" y="350" width="8" height="12"/>
+    <rect x="344" y="350" width="8" height="12"/><rect x="354" y="350" width="8" height="12"/>
+    <rect x="364" y="350" width="8" height="12"/><rect x="374" y="350" width="8" height="12"/>
+  </g>
+  <rect x="324" y="362" width="58" height="2" fill="#2E2B26"/>
+
+  <!-- card 3 -->
+  <rect x="34" y="406" width="366" height="78" fill="#2E2B26"/>
+  <rect x="30" y="402" width="366" height="78" fill="#F4EFE4" stroke="#2E2B26" stroke-width="2"/>
+  <rect x="42" y="414" width="32" height="32" fill="#D98A2B" stroke="#2E2B26" stroke-width="2"/>
+  <rect x="48" y="422" width="20" height="14" fill="none" stroke="#F4EFE4" stroke-width="2"/>
+  <path d="M54 426v6M51 429h6" stroke="#F4EFE4" stroke-width="2"/>
+  <text x="86" y="426" fill="#2E2B26" font-size="13" font-weight="bold">XBOX WIRELESS CONTROLLER</text>
+  <text x="86" y="446" fill="#6F6A5E" font-size="12">蓝牙 / 1 分钟前 / 系统报告</text>
+  <text x="382" y="430" text-anchor="end" fill="#2E2B26" font-size="24" font-weight="bold">18%</text>
+  <g fill="#D98A2B">
+    <rect x="324" y="442" width="8" height="12"/>
+  </g>
+  <g fill="#C9C1AE">
+    <rect x="334" y="442" width="8" height="12"/><rect x="344" y="442" width="8" height="12"/>
+    <rect x="354" y="442" width="8" height="12"/><rect x="364" y="442" width="8" height="12"/>
+    <rect x="374" y="442" width="8" height="12"/>
+  </g>
+  <rect x="324" y="454" width="58" height="2" fill="#2E2B26"/>
+
+  <!-- card 4 -->
+  <rect x="34" y="498" width="366" height="78" fill="#2E2B26"/>
+  <rect x="30" y="494" width="366" height="78" fill="#F4EFE4" stroke="#2E2B26" stroke-width="2"/>
+  <rect x="42" y="506" width="32" height="32" fill="#B55239" stroke="#2E2B26" stroke-width="2"/>
+  <path d="M50 516v-3a8 8 0 0 1 16 0v3" fill="none" stroke="#F4EFE4" stroke-width="2"/>
+  <rect x="47" y="515" width="5" height="9" fill="#F4EFE4"/>
+  <rect x="64" y="515" width="5" height="9" fill="#F4EFE4"/>
+  <text x="86" y="518" fill="#2E2B26" font-size="13" font-weight="bold">SONY WH-1000XM5</text>
+  <text x="86" y="538" fill="#6F6A5E" font-size="12">蓝牙 / 充电中 / 系统报告</text>
+  <text x="382" y="522" text-anchor="end" fill="#2E2B26" font-size="24" font-weight="bold">35%</text>
+  <g fill="#4F8A5B">
+    <rect x="324" y="534" width="8" height="12"/><rect x="334" y="534" width="8" height="12"/>
+    <rect x="344" y="534" width="8" height="12"/>
+  </g>
+  <g fill="#C9C1AE">
+    <rect x="354" y="534" width="8" height="12"/><rect x="364" y="534" width="8" height="12"/>
+    <rect x="374" y="534" width="8" height="12"/>
+  </g>
+  <rect x="324" y="546" width="58" height="2" fill="#2E2B26"/>
+
+  <!-- footer -->
+  <rect x="30" y="592" width="370" height="2" fill="#2E2B26"/>
+  <text x="32" y="620" fill="#6F6A5E" font-size="12">每 60 秒 / 刚刚刷新</text>
+  <rect x="326" y="604" width="74" height="28" fill="#E3DCCB" stroke="#2E2B26" stroke-width="2"/>
+  <text x="363" y="623" text-anchor="middle" fill="#2E2B26" font-size="12" font-weight="bold">诊断</text>
+
+  <!-- tray -->
+  <rect x="356" y="646" width="28" height="20" fill="#F4EFE4" stroke="#2E2B26" stroke-width="2"/>
+  <rect x="360" y="650" width="4" height="12" fill="#C8443C"/>
+  <rect x="366" y="650" width="4" height="12" fill="#C8443C"/>
+  <rect x="372" y="650" width="4" height="12" fill="#C8443C"/>
+  <rect x="378" y="650" width="2" height="12" fill="#C9C1AE"/>
+  <rect x="384" y="652" width="4" height="8" fill="#2E2B26"/>
+</svg>

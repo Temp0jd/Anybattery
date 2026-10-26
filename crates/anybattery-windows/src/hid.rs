@@ -50,6 +50,7 @@ pub struct HidInterface {
     pub input_len: u16,
     pub output_len: u16,
     pub feature_len: u16,
+    pub interface_number: Option<u16>,
     pub container_id: Option<String>,
     pub instance_id: Option<String>,
 }
@@ -186,9 +187,26 @@ fn inspect(path: &str) -> Option<HidInterface> {
         input_len: caps.InputReportByteLength,
         output_len: caps.OutputReportByteLength,
         feature_len: caps.FeatureReportByteLength,
+        interface_number: interface_number(path),
         container_id: None,
         instance_id: None,
     })
+}
+
+pub fn interface_number(path: &str) -> Option<u16> {
+    let lower = path.to_ascii_lowercase();
+    let idx = lower.find("&mi_")?;
+    let rest = &lower[idx + 4..];
+    let hex: String = rest.chars().take_while(|c| c.is_ascii_hexdigit()).collect();
+    u16::from_str_radix(&hex, 16).ok()
+}
+
+pub fn is_bluetooth_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.contains("vid&")
+        || lower.contains("00001124-0000-1000-8000-00805f9b34fb")
+        || lower.contains("00001812-0000-1000-8000-00805f9b34fb")
+        || lower.contains("bthle")
 }
 
 pub fn open_path(path: &str, write: bool) -> Option<HANDLE> {
@@ -287,6 +305,33 @@ pub fn output_write(path: &str, bytes: &[u8]) -> bool {
 
 pub fn input_read(path: &str, length: usize, timeout_ms: u32) -> Option<Vec<u8>> {
     with_handle(path, false, |handle| read_overlapped(handle, length, timeout_ms))
+}
+
+pub fn write_report(handle: HANDLE, bytes: &[u8]) -> bool {
+    unsafe { WriteFile(handle, Some(bytes), None, None) }.is_ok()
+}
+
+pub fn read_report(handle: HANDLE, length: usize, timeout_ms: u32) -> Option<Vec<u8>> {
+    read_overlapped(handle, length, timeout_ms)
+}
+
+pub fn listen<T>(
+    path: &str,
+    length: usize,
+    total_ms: u32,
+    mut parse: impl FnMut(&[u8]) -> Option<T>,
+) -> Option<T> {
+    with_handle(path, false, |handle| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(total_ms as u64);
+        while std::time::Instant::now() < deadline {
+            if let Some(report) = read_overlapped(handle, length, 150) {
+                if let Some(value) = parse(&report) {
+                    return Some(value);
+                }
+            }
+        }
+        None
+    })
 }
 
 pub fn write_and_read(path: &str, request: &[u8], read_len: usize, timeout_ms: u32) -> Option<Vec<u8>> {
@@ -564,10 +609,11 @@ pub fn standard_snapshot(info: &HidInterface, battery: &StandardBattery, now: u6
 }
 
 pub fn transport_for(path: &str, vendor_id: u16) -> Transport {
+    if is_bluetooth_path(path) {
+        return Transport::BluetoothClassic;
+    }
     let lower = path.to_ascii_lowercase();
-    if lower.contains("bthle") {
-        Transport::BluetoothLe
-    } else if lower.contains("bthenum") {
+    if lower.contains("bthle") || lower.contains("bthenum") {
         Transport::BluetoothClassic
     } else if is_wireless_vid(vendor_id) {
         Transport::Usb24g
@@ -713,4 +759,28 @@ fn utf16_path(bytes: &[u8]) -> String {
         .take_while(|&u| u != 0)
         .collect();
     String::from_utf16_lossy(&units)
+}
+
+pub fn listen_idle<T>(
+    path: &str,
+    length: usize,
+    total_ms: u32,
+    idle_ms: u32,
+    mut parse: impl FnMut(&[u8]) -> Option<T>,
+) -> Option<T> {
+    with_handle(path, false, |handle| {
+        let started = std::time::Instant::now();
+        let mut last_report = started;
+        while started.elapsed() < std::time::Duration::from_millis(total_ms as u64) {
+            if let Some(report) = read_overlapped(handle, length, 150) {
+                last_report = std::time::Instant::now();
+                if let Some(value) = parse(&report) {
+                    return Some(value);
+                }
+            } else if last_report.elapsed() > std::time::Duration::from_millis(idle_ms as u64) {
+                return None;
+            }
+        }
+        None
+    })
 }

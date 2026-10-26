@@ -3,6 +3,8 @@
 #[cfg(windows)]
 mod bluetooth;
 #[cfg(windows)]
+mod extra;
+#[cfg(windows)]
 mod hid;
 #[cfg(windows)]
 mod scan;

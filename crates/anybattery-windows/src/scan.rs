@@ -57,13 +57,23 @@ pub fn scan(settings: &Settings) -> ScanResult {
             .map(|id| format!("container:{}", id))
             .unwrap_or_else(|| format!("hid:{:04X}:{:04X}:{}", info.vendor_id, info.product_id, hid::short_hash(&info.path)));
 
-        if let Some(reading) = vendor::read_vendor(info) {
-            let snapshot = snapshot_from_vendor(info, &reading, now);
-            diagnostics.push(format!(
-                "    -> {} {}% ({})",
-                reading.provider, reading.level, reading.verification.label_zh()
-            ));
-            insert(&mut map, key, snapshot);
+        let readings = vendor::read_vendor(info);
+        if !readings.is_empty() {
+            for reading in &readings {
+                let device_key = match reading.key_suffix.as_ref() {
+                    Some(suffix) => format!("{}:{}", key, suffix),
+                    None => key.clone(),
+                };
+                let snapshot = snapshot_from_vendor(info, reading, now);
+                diagnostics.push(format!(
+                    "    -> {} {}% ({}) {}",
+                    reading.provider,
+                    reading.level,
+                    reading.verification.label_zh(),
+                    reading.name.as_deref().unwrap_or("")
+                ));
+                insert(&mut map, device_key, snapshot);
+            }
             continue;
         }
 
@@ -100,7 +110,10 @@ pub fn scan(settings: &Settings) -> ScanResult {
         insert(&mut map, key, controller);
     }
 
-    let mut devices: Vec<DeviceSnapshot> = map.into_values().collect();
+    let mut devices: Vec<DeviceSnapshot> = map
+        .into_values()
+        .filter(|device| settings.show_unknown || device.battery.is_known())
+        .collect();
     devices.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
     ScanResult {
         devices,
@@ -112,19 +125,23 @@ pub fn scan(settings: &Settings) -> ScanResult {
 }
 
 fn snapshot_from_vendor(info: &hid::HidInterface, reading: &vendor::VendorReading, now: u64) -> DeviceSnapshot {
-    let name = if info.product.is_empty() {
-        reading.detail.clone()
-    } else {
-        info.product.clone()
-    };
-    let id = info
+    let name = reading
+        .name
+        .clone()
+        .or_else(|| (!info.product.is_empty()).then(|| info.product.clone()))
+        .unwrap_or_else(|| info.label());
+    let mut id = info
         .container_id
         .clone()
         .unwrap_or_else(|| format!("{:04X}:{:04X}:{}", info.vendor_id, info.product_id, hid::short_hash(&info.path)));
+    if let Some(suffix) = &reading.key_suffix {
+        id.push(':');
+        id.push_str(suffix);
+    }
     DeviceSnapshot::new(
         DeviceId::new("hid", &id),
-        name,
-        DeviceKind::infer_from_name(&info.product),
+        name.clone(),
+        reading.kind.unwrap_or_else(|| DeviceKind::infer_from_name(&name)),
         hid::transport_for(&info.path, info.vendor_id),
         BatterySource::new(reading.provider, reading.verification, reading.detail.clone()),
     )

@@ -1,4 +1,4 @@
-use anybattery_core::Confidence;
+use anybattery_core::{Confidence, DeviceKind};
 use std::time::Duration;
 
 use super::hid::{self, HidInterface};
@@ -10,10 +10,44 @@ pub struct VendorReading {
     pub provider: &'static str,
     pub verification: Confidence,
     pub detail: String,
+    pub name: Option<String>,
+    pub kind: Option<DeviceKind>,
+    pub key_suffix: Option<String>,
 }
 
-pub fn read_vendor(info: &HidInterface) -> Option<VendorReading> {
+impl Default for VendorReading {
+    fn default() -> Self {
+        Self {
+            level: 0,
+            charging: None,
+            provider: "",
+            verification: Confidence::Unverified,
+            detail: String::new(),
+            name: None,
+            kind: None,
+            key_suffix: None,
+        }
+    }
+}
+
+pub fn read_vendor(info: &HidInterface) -> Vec<VendorReading> {
+    if info.vendor_id == 0x046D {
+        let readings = read_logitech(info);
+        if !readings.is_empty() {
+            return readings;
+        }
+    }
+    if let Some(reading) = read_vendor_single(info) {
+        return vec![reading];
+    }
+    super::extra::read_vendor_extra(info)
+}
+
+fn read_vendor_single(info: &HidInterface) -> Option<VendorReading> {
     if !info.is_vendor_collection() && info.feature_len < 90 {
+        return None;
+    }
+    if info.vendor_id == 0x1532 && matches!(info.product_id, 0x053A | 0x0555 | 0x0556) {
         return None;
     }
     if info.vendor_id == 0x1532 {
@@ -228,6 +262,7 @@ fn read_razer(info: &HidInterface) -> Option<VendorReading> {
         provider: "Razer 90-byte",
         verification,
         detail: format!("{} · tid={:#04X}", name, used_tid),
+        ..Default::default()
     })
 }
 
@@ -302,6 +337,7 @@ fn read_compX_17(info: &HidInterface) -> Option<VendorReading> {
                 provider: "CompX 17-byte",
                 verification,
                 detail: format!("{} · {} mV", name, millivolts),
+                ..Default::default()
             });
         }
     }
@@ -334,6 +370,7 @@ fn read_compX_64(info: &HidInterface) -> Option<VendorReading> {
                     provider: "CompX 64-byte",
                     verification: Confidence::Community,
                     detail: name.to_owned(),
+                    ..Default::default()
                 });
             }
         }
@@ -367,6 +404,7 @@ fn read_vaXee(info: &HidInterface) -> Option<VendorReading> {
         provider: "VAXEE/ZYGEN",
         verification: Confidence::Community,
         detail: format!("feature 0x0E · {}%", level),
+        ..Default::default()
     })
 }
 
@@ -390,6 +428,7 @@ fn read_endgame(info: &HidInterface) -> Option<VendorReading> {
         provider: "Endgame Gear",
         verification: Confidence::Community,
         detail: voltage.map(|mv| format!("{} mV", mv)).unwrap_or_default(),
+        ..Default::default()
     })
 }
 
@@ -407,5 +446,225 @@ fn read_nordic(info: &HidInterface) -> Option<VendorReading> {
         provider: "Nordic nRF",
         verification: Confidence::Community,
         detail: "feature 0x05".to_owned(),
+        ..Default::default()
     })
+}
+
+const LOGITECH_VID: u16 = 0x046D;
+const F_ROOT: u16 = 0x0000;
+const F_NAME: u16 = 0x0005;
+const F_UNIFIED: u16 = 0x1004;
+const F_STATUS: u16 = 0x1000;
+const F_VOLTAGE: u16 = 0x1001;
+const F_ADC: u16 = 0x1F20;
+const BATTERY_FEATURES: [u16; 4] = [F_UNIFIED, F_STATUS, F_VOLTAGE, F_ADC];
+const LOGITECH_RECEIVERS: [u16; 20] = [
+    0xC548, 0xC52B, 0xC532, 0xC52F, 0xC518, 0xC51A, 0xC51B, 0xC521, 0xC525, 0xC526,
+    0xC52E, 0xC531, 0xC534, 0xC535, 0xC537, 0xC539, 0xC53A, 0xC53D, 0xC53F, 0xC541,
+];
+const VOLTAGE_CURVE: [(u16, u8); 13] = [
+    (4186, 100), (4067, 90), (3989, 80), (3922, 70), (3859, 60), (3811, 50),
+    (3778, 40), (3751, 30), (3717, 20), (3671, 10), (3646, 5), (3579, 2), (3500, 0),
+];
+
+fn is_logitech_receiver(info: &HidInterface) -> bool {
+    LOGITECH_RECEIVERS.contains(&info.product_id)
+        || {
+            let name = info.product.to_lowercase();
+            name.contains("receiver")
+                || name.contains("unifying")
+                || name.contains("lightspeed")
+                || name.contains("bolt")
+        }
+}
+
+fn hpp_request(
+    handle: windows::Win32::Foundation::HANDLE,
+    long: bool,
+    idx: u8,
+    feature: u8,
+    function: u8,
+    params: &[u8],
+) -> Option<Vec<u8>> {
+    let len = if long { 20 } else { 7 };
+    let mut request = vec![0u8; len];
+    request[0] = if long { 0x11 } else { 0x10 };
+    request[1] = idx;
+    request[2] = feature;
+    request[3] = (function << 4) | 0x0A;
+    for (i, byte) in params.iter().enumerate() {
+        if 4 + i < len {
+            request[4 + i] = *byte;
+        }
+    }
+    if !hid::write_report(handle, &request) {
+        return None;
+    }
+    let deadline = std::time::Instant::now() + Duration::from_millis(350);
+    while std::time::Instant::now() < deadline {
+        let Some(reply) = hid::read_report(handle, 64, 80) else {
+            continue;
+        };
+        if reply.len() < 4 || reply[1] != idx {
+            continue;
+        }
+        let function_byte = (function << 4) | 0x0A;
+        if reply[2] == feature && reply[3] == function_byte {
+            let mut payload = reply[4..].to_vec();
+            payload.resize(16, 0);
+            return Some(payload);
+        }
+        if (reply[2] == 0x8F || reply[2] == 0xFF) && reply.len() >= 5 {
+            return None;
+        }
+    }
+    None
+}
+
+fn hpp_feature_index(
+    handle: windows::Win32::Foundation::HANDLE,
+    long: bool,
+    idx: u8,
+    feature: u16,
+) -> u8 {
+    let params = [(feature >> 8) as u8, (feature & 0xFF) as u8];
+    hpp_request(handle, long, idx, 0x00, 0, &params)
+        .and_then(|p| p.first().copied())
+        .unwrap_or(0)
+}
+
+fn voltage_to_percent(mv: u16) -> u8 {
+    if mv >= VOLTAGE_CURVE[0].0 {
+        return 100;
+    }
+    for pair in VOLTAGE_CURVE.windows(2) {
+        let (high_mv, high_pct) = pair[0];
+        let (low_mv, low_pct) = pair[1];
+        if mv >= low_mv {
+            let span = (high_mv - low_mv).max(1) as f32;
+            let t = (mv - low_mv) as f32 / span;
+            let pct = low_pct as f32 + t * (high_pct as f32 - low_pct as f32);
+            return pct.round().clamp(0.0, 100.0) as u8;
+        }
+    }
+    0
+}
+
+fn logitech_identity(
+    handle: windows::Win32::Foundation::HANDLE,
+    long: bool,
+    idx: u8,
+) -> (Option<String>, Option<DeviceKind>) {
+    let fi = hpp_feature_index(handle, long, idx, F_NAME);
+    if fi == 0 {
+        return (None, None);
+    }
+    let length = hpp_request(handle, long, idx, fi, 0, &[])
+        .and_then(|p| p.first().copied())
+        .unwrap_or(0) as usize;
+    let mut raw = Vec::new();
+    let mut offset = 0usize;
+    while raw.len() < length.min(64) {
+        let Some(chunk) = hpp_request(handle, long, idx, fi, 1, &[offset as u8]) else {
+            break;
+        };
+        if chunk.iter().all(|b| *b == 0) {
+            break;
+        }
+        raw.extend_from_slice(&chunk[..chunk.len().min(16)]);
+        offset += 16;
+    }
+    let name = String::from_utf8_lossy(&raw[..raw.len().min(length)]).trim().to_string();
+    let kind = hpp_request(handle, long, idx, fi, 2, &[])
+        .and_then(|p| p.first().copied())
+        .map(|value| match value {
+            0 | 2 => DeviceKind::Keyboard,
+            3 | 4 | 5 => DeviceKind::Mouse,
+            8 => DeviceKind::Headset,
+            _ => DeviceKind::Unknown,
+        });
+    ((!name.is_empty()).then_some(name), kind)
+}
+
+fn read_logitech_slot(info: &HidInterface, idx: u8) -> Option<VendorReading> {
+    let long = info.output_len >= 20 || info.feature_len >= 20;
+    hid::with_handle(&info.path, true, |handle| {
+        if hpp_request(handle, long, idx, 0x00, 1, &[]).is_none() {
+            return None;
+        }
+        let (name, kind) = logitech_identity(handle, long, idx);
+        for feature in BATTERY_FEATURES {
+            let fi = hpp_feature_index(handle, long, idx, feature);
+            if fi == 0 {
+                continue;
+            }
+            let function = if feature == F_UNIFIED { 1 } else { 0 };
+            let Some(payload) = hpp_request(handle, long, idx, fi, function, &[]) else {
+                continue;
+            };
+            let (level, charging) = match feature {
+                F_UNIFIED => {
+                    let level = payload[0];
+                    let status = payload[2];
+                    if !(1..=100).contains(&level) {
+                        continue;
+                    }
+                    (level, Some(matches!(status, 1..=4)))
+                }
+                F_STATUS => {
+                    let level = payload[0];
+                    let status = payload[2];
+                    if !(1..=100).contains(&level) {
+                        continue;
+                    }
+                    (level, Some(matches!(status, 1..=4)))
+                }
+                F_VOLTAGE => {
+                    let mv = ((payload[0] as u16) << 8) | payload[1] as u16;
+                    if mv < 2500 {
+                        continue;
+                    }
+                    (voltage_to_percent(mv), Some(payload[2] & 0x80 != 0))
+                }
+                F_ADC => {
+                    let mv = ((payload[0] as u16) << 8) | payload[1] as u16;
+                    if payload[2] & 0x01 == 0 || mv < 2500 {
+                        continue;
+                    }
+                    (voltage_to_percent(mv), Some(payload[2] & 0x02 != 0))
+                }
+                _ => continue,
+            };
+            return Some(VendorReading {
+                level,
+                charging,
+                provider: "Logitech HID++",
+                verification: Confidence::Verified,
+                detail: format!("feature {:04X} · slot {}", feature, idx),
+                name,
+                kind,
+                key_suffix: Some(format!("logitech:{}", idx)),
+            });
+        }
+        None
+    })
+}
+
+pub fn read_logitech(info: &HidInterface) -> Vec<VendorReading> {
+    if info.usage_page < 0xFF00 {
+        return Vec::new();
+    }
+    let receiver = is_logitech_receiver(info);
+    let slots: Vec<u8> = if receiver {
+        (1..=6).collect()
+    } else {
+        vec![0xFF]
+    };
+    let mut out = Vec::new();
+    for slot in slots {
+        if let Some(reading) = read_logitech_slot(info, slot) {
+            out.push(reading);
+        }
+    }
+    out
 }

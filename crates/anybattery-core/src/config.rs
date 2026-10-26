@@ -45,7 +45,7 @@ impl Default for Settings {
             low_threshold: 20,
             critical_threshold: 10,
             autostart: false,
-            show_unknown: true,
+            show_unknown: false,
             active_ble: true,
             animations: true,
             theme: Theme::System,
