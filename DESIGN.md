@@ -2,7 +2,7 @@
 
 > Windows 10/11 x64 · Rust · 托盘常驻 · 只读 · 不装驱动 · 不要管理员权限
 >
-> 状态：**M1–M4 功能已实现，0.1.1 已发布**。当前版本为 0.1.1：像素风 UI、应用自绘标题栏、像素电池图标、五档电量配色、单 exe、主流协议族。
+> 状态：**M1–M4 功能已实现，0.1.2 已发布**。当前版本为 0.1.2：像素风 UI、应用自绘标题栏、像素电池图标、五档电量配色、单 exe、主流协议族。
 >
 > v0.1 → v0.2：补齐雷蛇 / Steam Controller / Xbox / PlayStation / Nintendo / 8BitDo 及主流品牌协议族；确定 egui 自绘 UI；取消 CLI；明确由我交叉编译 release；轮询间隔改为用户可调范围。
 >
@@ -10,7 +10,7 @@
 >
 > v0.3 → v0.4：UI 改为八位堂像素风（硬边框、零圆角、方块电量、Fusion Pixel 12px）；窗口改用 Windows 原生标题栏与按钮；按实际代码修正协议状态，移除未实现项的能力声明。
 >
-> v0.1.1：Razer Viper V2 Pro `1532:00B4/00B5` 与 FerrisPulse PID/90–91 字节协议对齐；UI 标题、实色图标块、告警条、单行页脚与列表收缩。
+> v0.1.2：Razer 同步 HID 查询、90 字节以上报文适配、Viper 冲突 PID 识别与诊断增强；UI 标题、实色图标块、告警条、单行页脚与列表收缩。
 >
 > v0.4 → v0.5：按后续 UI 变更，标题栏改为应用自绘像素标题栏（最小化 / 最大化或还原 / 关闭到托盘），不再使用 Windows 原生 caption 按钮；新增同源像素电池应用图标；电量改为五档配色，充电保留档色。v0.3 → v0.4 的原生标题栏历史记录保留。
 
@@ -316,7 +316,7 @@ pub enum BatteryStatus {
 
 适合“固定请求 → 固定回复 → 固定偏移”的协议；复杂帧（CRC/TLV/序号）用 Rust adapter。
 
-当前状态：`anybattery-core` 已有 schema 解析、字段校验和单测；扫描器与设置页还没有调用它，因此 0.1.1 release **不支持**自定义 JSON 协议导入。下面是接入时使用的格式。
+当前状态：`anybattery-core` 已有 schema 解析、字段校验和单测；扫描器与设置页还没有调用它，因此 0.1.2 release **不支持**自定义 JSON 协议导入。下面是接入时使用的格式。
 
 ```json
 {
@@ -607,7 +607,7 @@ AnyBattery/
 | **M1 核心 + 托盘** | workspace、HID 枚举、BT PnP、标准 HID、缓存、egui 面板、托盘、设置、轮询 | ✅ 代码完成，待真机验收 |
 | **M2 手柄 + 雷蛇** | Xbox/Steam 2025/PS/Nintendo/8BitDo；Razer 90B + PA；诊断页 | ✅ 代码完成，待真机验收 |
 | **M3 主流协议族** | Logitech/CompX/SteelSeries/HyperX/Corsair/ASUS/Keychron/Lofree/NZXT/VAXEE/Endgame/Nordic | 🟡 代码完成；Jieli、JSON 导入未实现 |
-| **M4 打磨 + 发布** | 自绘像素标题栏、像素电池图标、五档配色、托盘动态图标、zip、文档、SHA-256 | ✅ 0.1.1 已发布（Razer Viper V2 Pro/FerrisPulse 对齐）；Toast、单实例、代码签名未做，24h soak 待做 |
+| **M4 打磨 + 发布** | 自绘像素标题栏、像素电池图标、五档配色、托盘动态图标、zip、文档、SHA-256 | ✅ 0.1.2 已发布（Razer 同步 HID 查询与诊断增强）；Toast、单实例、代码签名未做，24h soak 待做 |
 
 每个里程碑结束都停下来给你验收，不一次性写完再给你。
 

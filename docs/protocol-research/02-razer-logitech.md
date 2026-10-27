@@ -9,7 +9,7 @@
 
 > **FerrisPulse 校正（2026-10-27）**：本文下方早期 Razer PID 映射来自 OpenRazer/HaloBattery 快照，已过时。以下实现事实以 FerrisPulse commit `4917a10e238ed3dba2938969752886353c8ff5e9`（GPL-3.0；仅提取协议事实，不复制代码）和当前工作树 `crates/anybattery-windows/src/vendor.rs` 的 `razer_name`/`razer_uses_special_protocol` 为准：
 > - Razer Viper V2 Pro 是 `1532:00B4`（有线）/ `1532:00B5`（接收器），首选 TID `0x1F`，Community。
-> - `1532:00A5` / `1532:00A6` 是 Razer Cobra Pro，不是 Viper V2 Pro。
+> - `1532:00A5` / `1532:00A6` 在 OpenRazer 与 FerrisPulse 最新提交中均为 Razer Viper V2 Pro；若产品字符串明确为 Cobra，则由产品名保留 Cobra Pro 识别。
 > - 原文 B2/B3/C1 中 `00A5/00A6 = Viper V2 Pro`、`00B4 = Naga V2 HyperSpeed` 等旧映射只保留作研究历史，**不得再作为实现依据**；当前 90B 表以代码为准。
 > - 本文其余“当前代码”差距描述以基线 `70906c7` 为准；`0528`/`0557`/90–91 字节等已在当前工作树修正，勿当作最新实现状态。
 

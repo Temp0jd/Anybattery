@@ -58,7 +58,7 @@ pub fn scan(settings: &Settings) -> ScanResult {
             .map(|id| format!("container:{}", id))
             .unwrap_or_else(|| format!("hid:{:04X}:{:04X}:{}", info.vendor_id, info.product_id, hid::short_hash(&info.path)));
 
-        let readings = vendor::read_vendor(info, &oem_paths);
+        let readings = vendor::read_vendor_with_diagnostics(info, &oem_paths, &mut diagnostics);
         if !readings.is_empty() {
             for reading in &readings {
                 let device_key = match reading.key_suffix.as_ref() {

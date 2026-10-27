@@ -22,9 +22,8 @@ use windows::Win32::Foundation::{
     CloseHandle, ERROR_IO_PENDING, HANDLE, WAIT_OBJECT_0,
 };
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, ReadFile, WriteFile, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OVERLAPPED, FILE_SHARE_READ,
-    FILE_SHARE_WRITE,
-    OPEN_EXISTING,
+    CreateFileW, ReadFile, WriteFile, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OVERLAPPED, FILE_FLAGS_AND_ATTRIBUTES,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
@@ -250,6 +249,28 @@ pub fn with_handle<T>(path: &str, write: bool, f: impl FnOnce(HANDLE) -> Option<
     let result = f(handle);
     unsafe { CloseHandle(handle) };
     result
+}
+
+/// Open a HID collection exactly as FerrisPulse does for Razer queries:
+/// zero desired access and no overlapped flag. Razer SetFeature/GetFeature is
+/// synchronous and some receivers do not answer on an overlapped read/write
+/// handle. Keep this separate from the shared overlapped path.
+pub fn open_sync(path: &str) -> Result<HANDLE, u32> {
+    let wide = to_wide(path);
+    match unsafe {
+        CreateFileW(
+            PCWSTR(wide.as_ptr()),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAGS_AND_ATTRIBUTES(0),
+            None,
+        )
+    } {
+        Ok(handle) => Ok(handle),
+        Err(_) => Err(unsafe { windows::Win32::Foundation::GetLastError() }.0),
+    }
 }
 
 pub fn close(handle: HANDLE) {

@@ -78,7 +78,7 @@ Razer 不是全系支持。下列型号必须同时命中 PID、vendor collectio
 
 #### 90B 通用 Feature（class `0x07`，cmd `0x80` 读电量、`0x84` 读充电）
 
-代码读取 caps 的 90/91 字节 FeatureReportByteLength（91 字节有前置 report ID `0`，解析时去掉），在同一个 HID 句柄内完成 Set/Get；TID 依次尝试表内首选、`0x1F`、`0x3F`、`0xFF`（去重）。电量按 `round(raw * 100 / 255)` 后 clamp 到 `1..=100`，raw=0 视为无效；充电查询 `0x84` 返回 `1` 为充电，查询失败保持未知。下表同一行的多个 PID 是代码中同型号的公开 PID 合并，未逐 PID 验证连接模式。
+代码读取 caps 的 90 字节及以上 FeatureReportByteLength（只有 91 字节有前置 report ID `0`，解析时去掉），雷蛇使用 FerrisPulse 同款的同步零权限 HID 句柄完成一次 SetFeature → 15ms → GetFeature；TID 依次尝试表内首选、`0x1F`、`0x3F`、`0xFF`（去重）。诊断页会记录 CreateFile/SetFeature/GetFeature 的 Win32 错误或回复校验失败原因。电量按 `round(raw * 100 / 255)` 后 clamp 到 `1..=100`，raw=0 视为无效；充电查询 `0x84` 返回 `1` 为充电，查询失败保持未知。下表同一行的多个 PID 是代码中同型号的公开 PID 合并，未逐 PID 验证连接模式。
 
 | 型号 | VID:PID | 首选 TID | 电量 / 充电 | 状态 | 限制 / 证据 |
 |---|---|---|---|---|---|
@@ -92,7 +92,7 @@ Razer 不是全系支持。下列型号必须同时命中 PID、vendor collectio
 | Razer Viper V3 Pro | `1532:00C0` / `1532:00C1` / `1532:00C2` / `1532:00C3` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
 | Razer Viper V3 Pro SE | `1532:00DE` / `1532:00DF` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
 | Razer Viper V3 HyperSpeed | `1532:00AC` / `1532:00AD` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
-| Razer Viper V2 Pro | `1532:00B4`（有线） / `1532:00B5`（接收器） | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | Community；尚无本机对应硬件；见下方已知限制。 |
+| Razer Viper V2 Pro | `1532:00A5` / `1532:00A6`（OpenRazer）及 `1532:00B4` / `1532:00B5`（FerrisPulse 修订/别名） | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 以产品字符串区分 Viper/Cobra/Naga；尚无本机对应硬件；见下方已知限制。 |
 | Razer Viper Mini Signature Edition | `1532:00A7` / `1532:00A8` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
 | Razer Viper Ultimate | `1532:0084` / `1532:0088` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
 | Razer Viper Mini | `1532:0078` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
@@ -116,7 +116,7 @@ Razer 不是全系支持。下列型号必须同时命中 PID、vendor collectio
 | Razer Basilisk X HyperSpeed | `1532:0085` / `1532:0086` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
 | Razer Basilisk Ultimate | `1532:007A` / `1532:007B` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
 | Razer Basilisk | `1532:0064` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
-| Razer Cobra Pro | `1532:00A5` / `1532:00A6` / `1532:00AF` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | `00A5`/`00A6` 为 FerrisPulse 映射，`00AF` 在代码中同名；本机未验证。 |
+| Razer Cobra Pro | `1532:00AF`（有线）/ `1532:00B0`（无线，按 OpenRazer） | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | `00A5`/`00A6` 不再单独作为 Cobra 的唯一依据；若产品名为 Cobra 则保留该型号；本机未验证。 |
 | Razer Cobra | `1532:00A4` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
 | Razer Naga V2 Pro | `1532:008F` / `1532:0090` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
 | Razer Naga V2 HyperSpeed | `1532:0095` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |

@@ -1,6 +1,9 @@
 use anybattery_core::{Confidence, DeviceKind};
 use std::collections::{HashMap, HashSet};
+use std::ffi::c_void;
 use std::time::Duration;
+use windows::Win32::Devices::HumanInterfaceDevice::{HidD_GetFeature, HidD_SetFeature};
+use windows::Win32::Foundation::GetLastError;
 
 use super::hid::{self, HidInterface};
 
@@ -32,6 +35,16 @@ impl Default for VendorReading {
 }
 
 pub fn read_vendor(info: &HidInterface, oem_paths: &HashSet<String>) -> Vec<VendorReading> {
+    read_vendor_with_diagnostics(info, oem_paths, &mut Vec::new())
+}
+
+/// Variant used by the scanner so a failed Razer query is diagnosable rather
+/// than collapsing into the generic "unmatched protocol" message.
+pub fn read_vendor_with_diagnostics(
+    info: &HidInterface,
+    oem_paths: &HashSet<String>,
+    trace: &mut Vec<String>,
+) -> Vec<VendorReading> {
     if info.vendor_id == 0x046D {
         let readings = read_logitech(info);
         if !readings.is_empty() {
@@ -43,14 +56,23 @@ pub fn read_vendor(info: &HidInterface, oem_paths: &HashSet<String>) -> Vec<Vend
             return vec![reading];
         }
     }
-    if let Some(reading) = read_vendor_single(info) {
+    if let Some(reading) = read_vendor_single(info, trace) {
         return vec![reading];
     }
     super::extra::read_vendor_extra(info)
 }
 
-fn read_vendor_single(info: &HidInterface) -> Option<VendorReading> {
+fn read_vendor_single(info: &HidInterface, trace: &mut Vec<String>) -> Option<VendorReading> {
+    if info.vendor_id == 0x1532 {
+        trace.push(format!(
+            "  Razer 候选 {:04X}:{:04X} · usage {:04X}:{:04X} · feature {}",
+            info.vendor_id, info.product_id, info.usage_page, info.usage, info.feature_len
+        ));
+    }
     if !info.is_vendor_collection() && info.feature_len < 90 {
+        if info.vendor_id == 0x1532 {
+            trace.push("    跳过：FeatureReportByteLength < 90".to_string());
+        }
         return None;
     }
     if is_aula_keyboard(info) {
@@ -63,7 +85,7 @@ fn read_vendor_single(info: &HidInterface) -> Option<VendorReading> {
         return None;
     }
     if info.vendor_id == 0x1532 {
-        if let Some(reading) = read_razer(info) {
+        if let Some(reading) = read_razer(info, trace) {
             return Some(reading);
         }
     }
@@ -194,9 +216,11 @@ fn razer_name(pid: u16) -> Option<(&'static str, u8, Confidence)> {
         0x007B => ("Razer Basilisk Ultimate", 0x1F, community),
         0x0064 => ("Razer Basilisk", 0x1F, community),
 
-        // Cobra
-        0x00A5 => ("Razer Cobra Pro", 0x1F, community),
-        0x00A6 => ("Razer Cobra Pro", 0x1F, community),
+        // Viper V2 Pro also appears as 00A5/00A6 in current OpenRazer
+        // and FerrisPulse tables. Product-name disambiguation below retains
+        // Cobra Pro devices that expose a Cobra product string.
+        0x00A5 => ("Razer Viper V2 Pro", 0x1F, community),
+        0x00A6 => ("Razer Viper V2 Pro", 0x1F, community),
         0x00A4 => ("Razer Cobra", 0x1F, community),
 
         // Naga
@@ -243,16 +267,35 @@ fn razer_name(pid: u16) -> Option<(&'static str, u8, Confidence)> {
     })
 }
 
+fn razer_name_for_interface(info: &HidInterface) -> Option<(&'static str, u8, Confidence)> {
+    let (name, tid, confidence) = razer_name(info.product_id)?;
+    let product = info.product.to_ascii_lowercase();
+    // These PIDs have appeared in different hardware revisions. Do not let a
+    // shared PID erase the model that the device itself reports.
+    if matches!(info.product_id, 0x00A5 | 0x00A6) && product.contains("cobra") {
+        return Some(("Razer Cobra Pro", tid, confidence));
+    }
+    if matches!(info.product_id, 0x00B4 | 0x00B5) && product.contains("naga") {
+        return Some(("Razer Naga V2 HyperSpeed", tid, confidence));
+    }
+    if matches!(info.product_id, 0x00A5 | 0x00A6 | 0x00B4 | 0x00B5)
+        && product.contains("viper")
+    {
+        return Some(("Razer Viper V2 Pro", tid, confidence));
+    }
+    Some((name, tid, confidence))
+}
+
 fn build_razer_request(
     report_len: usize,
     transaction_id: u8,
     class: u8,
     command: u8,
 ) -> Option<Vec<u8>> {
-    if !matches!(report_len, 90 | 91) {
+    if !(90..=4096).contains(&report_len) {
         return None;
     }
-    let prefix = report_len - 90;
+    let prefix = usize::from(report_len == 91);
     let mut buffer = vec![0u8; report_len];
     let msg = &mut buffer[prefix..];
     msg[0] = 0x00;
@@ -269,13 +312,11 @@ fn build_razer_request(
 }
 
 fn normalize_razer_reply(reply: &[u8]) -> Option<Vec<u8>> {
-    if reply.len() >= 91 {
-        Some(reply[1..91].to_vec())
-    } else if reply.len() >= 90 {
-        Some(reply[..90].to_vec())
-    } else {
-        None
+    let prefix = usize::from(reply.len() == 91);
+    if reply.len() < 90 || reply.len() < prefix + 90 {
+        return None;
     }
+    Some(reply[prefix..prefix + 90].to_vec())
 }
 
 fn razer_level(raw: u8) -> u8 {
@@ -296,8 +337,7 @@ fn parse_razer_charging(reply: &[u8]) -> Option<bool> {
     (data[0] == 0x02 && data[6] == 0x07 && data[7] == 0x84).then_some(data[9] == 1)
 }
 
-const RAZER_POLL_ATTEMPTS: u8 = 5;
-const RAZER_POLL_DELAY: Duration = Duration::from_millis(60);
+const RAZER_QUERY_DELAY: Duration = Duration::from_millis(15);
 
 fn razer_transaction_ids(preferred: u8) -> Vec<u8> {
     let mut ids = Vec::with_capacity(4);
@@ -309,31 +349,86 @@ fn razer_transaction_ids(preferred: u8) -> Vec<u8> {
     ids
 }
 
+fn razer_reply_summary(reply: &[u8]) -> String {
+    let Some(data) = normalize_razer_reply(reply) else {
+        return format!("长度 {}（过短）", reply.len());
+    };
+    format!(
+        "len={} status={:#04X} class={:#04X} cmd={:#04X} raw={:#04X}",
+        reply.len(), data[0], data[6], data[7], data[9]
+    )
+}
+
+/// Match FerrisPulse exactly: a synchronous zero-access handle, one Set/Get
+/// per TID, and a 15ms settle delay. No overlapped read/write handle and no
+/// repeated polling of the same TID.
 fn razer_query<T>(
     info: &HidInterface,
     report_len: usize,
     tid: u8,
     class: u8,
     command: u8,
-    parse: impl FnMut(&[u8]) -> Option<T>,
+    trace: &mut Vec<String>,
+    mut parse: impl FnMut(&[u8]) -> Option<T>,
 ) -> Option<T> {
-    let request = build_razer_request(report_len, tid, class, command)?;
-    hid::feature_poll(
-        &info.path,
-        &request,
-        report_len,
-        RAZER_POLL_ATTEMPTS,
-        RAZER_POLL_DELAY,
-        parse,
-    )
+    let Some(request) = build_razer_request(report_len, tid, class, command) else {
+        trace.push(format!("    tid={tid:#04X} 无法构造 {report_len} 字节请求"));
+        return None;
+    };
+    trace.push(format!(
+        "    Razer tid={tid:#04X} class={class:#04X} cmd={command:#04X} · 同步 Set/Get · {report_len}B"
+    ));
+    let handle = match hid::open_sync(&info.path) {
+        Ok(handle) => handle,
+        Err(error) => {
+            trace.push(format!("      CreateFile(sync) 失败 Win32={error}"));
+            return None;
+        }
+    };
+    let set_ok = unsafe {
+        HidD_SetFeature(
+            handle,
+            request.as_ptr() as *const c_void,
+            request.len() as u32,
+        )
+    };
+    if !set_ok {
+        let error = unsafe { GetLastError() }.0;
+        trace.push(format!("      HidD_SetFeature 失败 Win32={error}"));
+        hid::close(handle);
+        return None;
+    }
+    std::thread::sleep(RAZER_QUERY_DELAY);
+    let mut reply = vec![0u8; report_len];
+    reply[0] = request[0];
+    let get_ok = unsafe {
+        HidD_GetFeature(
+            handle,
+            reply.as_mut_ptr() as *mut c_void,
+            reply.len() as u32,
+        )
+    };
+    let result = if get_ok {
+        let parsed = parse(&reply);
+        if parsed.is_none() {
+            trace.push(format!("      回复未通过校验：{}", razer_reply_summary(&reply)));
+        }
+        parsed
+    } else {
+        let error = unsafe { GetLastError() }.0;
+        trace.push(format!("      HidD_GetFeature 失败 Win32={error}"));
+        None
+    };
+    hid::close(handle);
+    result
 }
 
 fn razer_report_len(feature_len: u16) -> Option<usize> {
-    matches!(feature_len, 90 | 91).then_some(feature_len as usize)
+    (90..=4096).contains(&feature_len).then_some(feature_len as usize)
 }
 
-fn read_razer(info: &HidInterface) -> Option<VendorReading> {
-    let (name, preferred_tid, verification) = razer_name(info.product_id).or_else(|| {
+fn read_razer(info: &HidInterface, trace: &mut Vec<String>) -> Option<VendorReading> {
+    let (name, preferred_tid, verification) = razer_name_for_interface(info).or_else(|| {
         let lower = info.product.to_lowercase();
         let wireless = [
             "hyperspeed",
@@ -347,16 +442,23 @@ fn read_razer(info: &HidInterface) -> Option<VendorReading> {
         .any(|word| lower.contains(word));
         wireless.then_some((info.product.as_str(), 0x1F, Confidence::Unverified))
     })?;
-    let report_len = razer_report_len(info.feature_len)?;
+    let Some(report_len) = razer_report_len(info.feature_len) else {
+        trace.push(format!("    跳过：Razer 不支持的 feature 长度 {}", info.feature_len));
+        return None;
+    };
     let mut battery = None;
     for tid in razer_transaction_ids(preferred_tid) {
-        if let Some(level) = razer_query(info, report_len, tid, 0x07, 0x80, parse_razer_battery) {
+        if let Some(level) = razer_query(info, report_len, tid, 0x07, 0x80, trace, parse_razer_battery) {
+            trace.push(format!("      电量读取成功：{level}% · tid={tid:#04X}"));
             battery = Some((level, tid));
             break;
         }
     }
-    let (level, used_tid) = battery?;
-    let charging = razer_query(info, report_len, used_tid, 0x07, 0x84, parse_razer_charging);
+    let Some((level, used_tid)) = battery else {
+        trace.push("    未获得有效 Razer 电量回复".to_string());
+        return None;
+    };
+    let charging = razer_query(info, report_len, used_tid, 0x07, 0x84, trace, parse_razer_charging);
     let model = name.strip_prefix("Razer ").unwrap_or(name);
     Some(VendorReading {
         level,
@@ -1567,7 +1669,7 @@ mod tests {
 
     fn razer_reply(report_len: usize, status: u8, class: u8, command: u8, raw: u8) -> Vec<u8> {
         let mut reply = vec![0u8; report_len];
-        let offset = report_len - 90;
+        let offset = usize::from(report_len == 91);
         reply[offset] = status;
         reply[offset + 6] = class;
         reply[offset + 7] = command;
@@ -1577,6 +1679,8 @@ mod tests {
 
     #[test]
     fn razer_viper_v2_pro_uses_b4_and_b5_and_is_not_naga() {
+        assert_eq!(razer_model(0x00A5), Some("Razer Viper V2 Pro"));
+        assert_eq!(razer_model(0x00A6), Some("Razer Viper V2 Pro"));
         assert_eq!(razer_model(0x00B4), Some("Razer Viper V2 Pro"));
         assert_eq!(razer_model(0x00B5), Some("Razer Viper V2 Pro"));
         assert_ne!(razer_model(0x00B4), Some("Razer Naga V2 HyperSpeed"));
@@ -1654,8 +1758,8 @@ mod tests {
             (0x007A, "Razer Basilisk Ultimate"),
             (0x007B, "Razer Basilisk Ultimate"),
             (0x0064, "Razer Basilisk"),
-            (0x00A5, "Razer Cobra Pro"),
-            (0x00A6, "Razer Cobra Pro"),
+            (0x00A5, "Razer Viper V2 Pro"),
+            (0x00A6, "Razer Viper V2 Pro"),
             (0x00A4, "Razer Cobra"),
             (0x008F, "Razer Naga V2 Pro"),
             (0x0090, "Razer Naga V2 Pro"),
@@ -1742,7 +1846,11 @@ mod tests {
         assert_eq!(request_90[89], 0);
 
         assert_eq!(build_razer_request(89, 0x1F, 0x07, 0x80), None);
-        assert_eq!(build_razer_request(92, 0x1F, 0x07, 0x80), None);
+        let request_92 = build_razer_request(92, 0x1F, 0x07, 0x80).unwrap();
+        assert_eq!(request_92.len(), 92);
+        assert_eq!(request_92[1], 0x1F);
+        assert_eq!(request_92[88], razer_crc(&request_92, 0));
+        assert_eq!(request_92[89], 0);
     }
 
     #[test]
@@ -1756,10 +1864,10 @@ mod tests {
         assert_eq!(normalize_razer_reply(&reply_90).unwrap().len(), 90);
 
         let mut reply_longer = vec![0u8; 100];
-        reply_longer[1] = 0x02;
-        reply_longer[7] = 0x07;
-        reply_longer[8] = 0x80;
-        reply_longer[10] = 128;
+        reply_longer[0] = 0x02;
+        reply_longer[6] = 0x07;
+        reply_longer[7] = 0x80;
+        reply_longer[9] = 128;
         assert_eq!(normalize_razer_reply(&reply_longer).unwrap()[0], 0x02);
         assert_eq!(normalize_razer_reply(&[0u8; 89]), None);
     }
