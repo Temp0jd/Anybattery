@@ -162,7 +162,8 @@ pub enum ProtocolError {
 
 impl ProtocolSpec {
     pub fn from_json(text: &str) -> Result<Self, ProtocolError> {
-        let spec: Self = serde_json::from_str(text).map_err(|e| ProtocolError::Json(e.to_string()))?;
+        let spec: Self =
+            serde_json::from_str(text).map_err(|e| ProtocolError::Json(e.to_string()))?;
         spec.validate()?;
         Ok(spec)
     }
@@ -173,7 +174,10 @@ impl ProtocolSpec {
         }
         if self.id.is_empty()
             || self.id.len() > 64
-            || !self.id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+            || !self
+                .id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
         {
             return Err(ProtocolError::Id(self.id.clone()));
         }
@@ -195,7 +199,10 @@ impl ProtocolSpec {
         for MatchByte(offset, hex) in &self.response.match_bytes {
             let bytes = hex_to_bytes(hex)?;
             if bytes.is_empty() || *offset > 255 {
-                return Err(ProtocolError::OutOfRange { offset: *offset, len: bytes.len() });
+                return Err(ProtocolError::OutOfRange {
+                    offset: *offset,
+                    len: bytes.len(),
+                });
             }
         }
         validate_field(&self.extract.level)?;
@@ -211,18 +218,23 @@ impl ProtocolSpec {
     pub fn matches_vid_pid(&self, vid: u16, pid: u16) -> bool {
         let hex = |v: u16| format!("{:04X}", v);
         let ok = |expected: &Option<String>, actual: String| {
-            expected.as_ref().is_none_or(|e| e.eq_ignore_ascii_case(&actual))
+            expected
+                .as_ref()
+                .is_none_or(|e| e.eq_ignore_ascii_case(&actual))
         };
         ok(&self.matcher.vid, hex(vid)) && ok(&self.matcher.pid, hex(pid))
     }
 
     pub fn response_matches(&self, report: &[u8]) -> bool {
-        self.response.match_bytes.iter().all(|MatchByte(offset, hex)| {
-            let Ok(expected) = hex_to_bytes(hex) else {
-                return false;
-            };
-            report.get(*offset..*offset + expected.len()) == Some(expected.as_slice())
-        })
+        self.response
+            .match_bytes
+            .iter()
+            .all(|MatchByte(offset, hex)| {
+                let Ok(expected) = hex_to_bytes(hex) else {
+                    return false;
+                };
+                report.get(*offset..*offset + expected.len()) == Some(expected.as_slice())
+            })
     }
 
     pub fn extract_level(&self, report: &[u8]) -> Result<Option<u8>, ProtocolError> {
@@ -275,7 +287,9 @@ fn validate_field(field: &Field) -> Result<(), ProtocolError> {
 fn read_field(report: &[u8], field: &Field) -> Result<Option<f32>, ProtocolError> {
     let offset = field.offset;
     let read = |len: usize| -> Result<&[u8], ProtocolError> {
-        report.get(offset..offset + len).ok_or(ProtocolError::OutOfRange { offset, len })
+        report
+            .get(offset..offset + len)
+            .ok_or(ProtocolError::OutOfRange { offset, len })
     };
     let value = match field.value_type {
         FieldType::U8 => read(1)?[0] as f32,
@@ -292,7 +306,10 @@ fn read_field(report: &[u8], field: &Field) -> Result<Option<f32>, ProtocolError
 }
 
 pub fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, ProtocolError> {
-    let cleaned: String = hex.chars().filter(|c| !c.is_whitespace() && *c != ':' && *c != '-').collect();
+    let cleaned: String = hex
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != ':' && *c != '-')
+        .collect();
     if cleaned.len() % 2 != 0 {
         return Err(ProtocolError::Hex(hex.to_owned()));
     }
@@ -357,9 +374,15 @@ mod tests {
     #[test]
     fn rejects_bad_hex_and_schema() {
         let bad = SAMPLE.replace("7D720200010701", "7D72020001070");
-        assert!(matches!(ProtocolSpec::from_json(&bad), Err(ProtocolError::Hex(_))));
+        assert!(matches!(
+            ProtocolSpec::from_json(&bad),
+            Err(ProtocolError::Hex(_))
+        ));
         let bad = SAMPLE.replace(r#""schema": 1"#, r#""schema": 2"#);
-        assert!(matches!(ProtocolSpec::from_json(&bad), Err(ProtocolError::Schema(2))));
+        assert!(matches!(
+            ProtocolSpec::from_json(&bad),
+            Err(ProtocolError::Schema(2))
+        ));
     }
 
     #[test]

@@ -1,9 +1,7 @@
 use std::ffi::c_void;
-use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::ERROR_SUCCESS;
-use windows::Win32::System::Registry::{
-    RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD,
-};
+use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
+use windows::core::{PCWSTR, w};
 
 /// Reads HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize\AppsUseLightTheme.
 /// Returns true when the system is in dark mode (value 0).
@@ -57,9 +55,11 @@ pub fn config_dir() -> std::path::PathBuf {
 }
 
 pub fn set_autostart(enabled: bool) -> bool {
-    use windows::core::w;
     use windows::Win32::Foundation::ERROR_SUCCESS;
-    use windows::Win32::System::Registry::{RegDeleteKeyValueW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_SZ};
+    use windows::Win32::System::Registry::{
+        HKEY_CURRENT_USER, REG_SZ, RegDeleteKeyValueW, RegSetKeyValueW,
+    };
+    use windows::core::w;
     let subkey = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
     let value = w!("AnyBattery");
     if !enabled {
@@ -85,9 +85,9 @@ pub fn set_autostart(enabled: bool) -> bool {
 }
 
 pub fn autostart_enabled() -> bool {
-    use windows::core::w;
     use windows::Win32::Foundation::ERROR_SUCCESS;
-    use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_SZ};
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_SZ, RegGetValueW};
+    use windows::core::w;
     let mut size = 0u32;
     let status = unsafe {
         RegGetValueW(
@@ -102,4 +102,3 @@ pub fn autostart_enabled() -> bool {
     };
     status == ERROR_SUCCESS && size > 0
 }
-

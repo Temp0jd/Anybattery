@@ -123,9 +123,9 @@ fn is_compX_vid(vid: u16) -> bool {
 
 // Razer PIDs that must never take the 90-byte generic path: 0x0528 uses a
 // 64-byte 0xFF feature report, 0x0557 is the wired BlackShark V2 X USB, and
-// 0x053A/0x0555/0x0556 speak the PA protocol in extra.rs.
+// 0x053A/0x0552/0x0555/0x0556 speak the PA protocol in extra.rs.
 fn razer_uses_special_protocol(pid: u16) -> bool {
-    matches!(pid, 0x0528 | 0x053A | 0x0555 | 0x0556 | 0x0557)
+    matches!(pid, 0x0528 | 0x053A | 0x0552 | 0x0555 | 0x0556 | 0x0557)
 }
 
 // ---------------------------------------------------------------------------
@@ -278,9 +278,7 @@ fn razer_name_for_interface(info: &HidInterface) -> Option<(&'static str, u8, Co
     if matches!(info.product_id, 0x00B4 | 0x00B5) && product.contains("naga") {
         return Some(("Razer Naga V2 HyperSpeed", tid, confidence));
     }
-    if matches!(info.product_id, 0x00A5 | 0x00A6 | 0x00B4 | 0x00B5)
-        && product.contains("viper")
-    {
+    if matches!(info.product_id, 0x00A5 | 0x00A6 | 0x00B4 | 0x00B5) && product.contains("viper") {
         return Some(("Razer Viper V2 Pro", tid, confidence));
     }
     Some((name, tid, confidence))
@@ -337,7 +335,10 @@ fn parse_razer_charging(reply: &[u8]) -> Option<bool> {
     (data[0] == 0x02 && data[6] == 0x07 && data[7] == 0x84).then_some(data[9] == 1)
 }
 
-const RAZER_QUERY_DELAY: Duration = Duration::from_millis(15);
+const RAZER_INITIAL_DELAY: Duration = Duration::from_millis(60);
+const RAZER_RETRY_DELAY: Duration = Duration::from_millis(80);
+const RAZER_MAX_READS: usize = 12;
+const RAZER_MAX_SENDS: usize = 3;
 
 fn razer_transaction_ids(preferred: u8) -> Vec<u8> {
     let mut ids = Vec::with_capacity(4);
@@ -354,14 +355,111 @@ fn razer_reply_summary(reply: &[u8]) -> String {
         return format!("长度 {}（过短）", reply.len());
     };
     format!(
-        "len={} status={:#04X} class={:#04X} cmd={:#04X} raw={:#04X}",
-        reply.len(), data[0], data[6], data[7], data[9]
+        "len={} status={:#04X} tid={:#04X} class={:#04X} cmd={:#04X} raw={:#04X}",
+        reply.len(),
+        data[0],
+        data[1],
+        data[6],
+        data[7],
+        data[9]
     )
 }
 
-/// Match FerrisPulse exactly: a synchronous zero-access handle, one Set/Get
-/// per TID, and a 15ms settle delay. No overlapped read/write handle and no
-/// repeated polling of the same TID.
+/// Run one bounded Razer Feature query. Synapse/Chroma can overwrite the shared
+/// reply buffer with lighting replies, so a successful status with another
+/// class/command is not our answer. Keep reading, and re-send after every four
+/// foreign replies (at most three sends total) just as the public protocol
+/// evidence requires. Busy replies are also polled; all other failures are final.
+fn razer_query_with_io<T>(
+    request: &[u8],
+    class: u8,
+    command: u8,
+    trace: &mut Vec<String>,
+    mut parse: impl FnMut(&[u8]) -> Option<T>,
+    mut set: impl FnMut(&[u8]) -> Result<(), u32>,
+    mut get: impl FnMut(u8) -> Result<Vec<u8>, u32>,
+    mut sleep: impl FnMut(Duration),
+) -> Option<T> {
+    if let Err(error) = set(request) {
+        trace.push(format!("      HidD_SetFeature 失败 Win32={error}"));
+        return None;
+    }
+    let mut sends = 1usize;
+    let mut foreign = 0usize;
+    for read_index in 0..RAZER_MAX_READS {
+        sleep(if read_index == 0 {
+            RAZER_INITIAL_DELAY
+        } else {
+            RAZER_RETRY_DELAY
+        });
+        let reply = match get(request[0]) {
+            Ok(reply) => reply,
+            Err(error) => {
+                trace.push(format!("      HidD_GetFeature 失败 Win32={error}"));
+                return None;
+            }
+        };
+        if let Some(value) = parse(&reply) {
+            if read_index > 0 || sends > 1 {
+                trace.push(format!(
+                    "      第 {} 次读取获得匹配回复（发送 {} 次）",
+                    read_index + 1,
+                    sends
+                ));
+            }
+            return Some(value);
+        }
+        let Some(data) = normalize_razer_reply(&reply) else {
+            trace.push(format!(
+                "      回复未通过校验：{}",
+                razer_reply_summary(&reply)
+            ));
+            return None;
+        };
+        let status = data[0];
+        let matching_command = data[6] == class && data[7] == command;
+        let is_foreign = status == 0x02 && !matching_command;
+        trace.push(format!(
+            "      读取 {}：{}{}",
+            read_index + 1,
+            razer_reply_summary(&reply),
+            if is_foreign { " · 其他命令" } else { "" }
+        ));
+        let retryable = status == 0x01 || is_foreign;
+        if retryable && read_index + 1 < RAZER_MAX_READS {
+            if is_foreign {
+                foreign += 1;
+                if foreign % 4 == 0 && sends < RAZER_MAX_SENDS {
+                    if let Err(error) = set(request) {
+                        trace.push(format!("      HidD_SetFeature 重发失败 Win32={error}"));
+                        return None;
+                    }
+                    sends += 1;
+                    trace.push(format!(
+                        "      收到 4 个其他命令回复，重发请求（{sends}/{RAZER_MAX_SENDS}）"
+                    ));
+                }
+            }
+            continue;
+        }
+        if is_foreign {
+            trace.push(
+                "      回复始终属于其他命令：Synapse/Chroma 可能正在占用此 HID collection"
+                    .to_owned(),
+            );
+        } else {
+            trace.push(format!(
+                "      回复未通过校验：{}",
+                razer_reply_summary(&reply)
+            ));
+        }
+        return None;
+    }
+    None
+}
+
+/// Keep the synchronous zero-access handle used by the Windows reference
+/// implementation, but do not give up after the first foreign or busy reply.
 fn razer_query<T>(
     info: &HidInterface,
     report_len: usize,
@@ -369,14 +467,14 @@ fn razer_query<T>(
     class: u8,
     command: u8,
     trace: &mut Vec<String>,
-    mut parse: impl FnMut(&[u8]) -> Option<T>,
+    parse: impl FnMut(&[u8]) -> Option<T>,
 ) -> Option<T> {
     let Some(request) = build_razer_request(report_len, tid, class, command) else {
         trace.push(format!("    tid={tid:#04X} 无法构造 {report_len} 字节请求"));
         return None;
     };
     trace.push(format!(
-        "    Razer tid={tid:#04X} class={class:#04X} cmd={command:#04X} · 同步 Set/Get · {report_len}B"
+        "    Razer tid={tid:#04X} class={class:#04X} cmd={command:#04X} · 同步有界重读 · {report_len}B"
     ));
     let handle = match hid::open_sync(&info.path) {
         Ok(handle) => handle,
@@ -385,46 +483,48 @@ fn razer_query<T>(
             return None;
         }
     };
-    let set_ok = unsafe {
-        HidD_SetFeature(
-            handle,
-            request.as_ptr() as *const c_void,
-            request.len() as u32,
-        )
-    };
-    if !set_ok {
-        let error = unsafe { GetLastError() }.0;
-        trace.push(format!("      HidD_SetFeature 失败 Win32={error}"));
-        hid::close(handle);
-        return None;
-    }
-    std::thread::sleep(RAZER_QUERY_DELAY);
-    let mut reply = vec![0u8; report_len];
-    reply[0] = request[0];
-    let get_ok = unsafe {
-        HidD_GetFeature(
-            handle,
-            reply.as_mut_ptr() as *mut c_void,
-            reply.len() as u32,
-        )
-    };
-    let result = if get_ok {
-        let parsed = parse(&reply);
-        if parsed.is_none() {
-            trace.push(format!("      回复未通过校验：{}", razer_reply_summary(&reply)));
-        }
-        parsed
-    } else {
-        let error = unsafe { GetLastError() }.0;
-        trace.push(format!("      HidD_GetFeature 失败 Win32={error}"));
-        None
-    };
+    let result = razer_query_with_io(
+        &request,
+        class,
+        command,
+        trace,
+        parse,
+        |bytes| {
+            let ok = unsafe {
+                HidD_SetFeature(handle, bytes.as_ptr() as *const c_void, bytes.len() as u32)
+            };
+            if ok {
+                Ok(())
+            } else {
+                Err(unsafe { GetLastError() }.0)
+            }
+        },
+        |report_id| {
+            let mut reply = vec![0u8; report_len];
+            reply[0] = report_id;
+            let ok = unsafe {
+                HidD_GetFeature(
+                    handle,
+                    reply.as_mut_ptr() as *mut c_void,
+                    reply.len() as u32,
+                )
+            };
+            if ok {
+                Ok(reply)
+            } else {
+                Err(unsafe { GetLastError() }.0)
+            }
+        },
+        std::thread::sleep,
+    );
     hid::close(handle);
     result
 }
 
 fn razer_report_len(feature_len: u16) -> Option<usize> {
-    (90..=4096).contains(&feature_len).then_some(feature_len as usize)
+    (90..=4096)
+        .contains(&feature_len)
+        .then_some(feature_len as usize)
 }
 
 fn read_razer(info: &HidInterface, trace: &mut Vec<String>) -> Option<VendorReading> {
@@ -443,12 +543,23 @@ fn read_razer(info: &HidInterface, trace: &mut Vec<String>) -> Option<VendorRead
         wireless.then_some((info.product.as_str(), 0x1F, Confidence::Unverified))
     })?;
     let Some(report_len) = razer_report_len(info.feature_len) else {
-        trace.push(format!("    跳过：Razer 不支持的 feature 长度 {}", info.feature_len));
+        trace.push(format!(
+            "    跳过：Razer 不支持的 feature 长度 {}",
+            info.feature_len
+        ));
         return None;
     };
     let mut battery = None;
     for tid in razer_transaction_ids(preferred_tid) {
-        if let Some(level) = razer_query(info, report_len, tid, 0x07, 0x80, trace, parse_razer_battery) {
+        if let Some(level) = razer_query(
+            info,
+            report_len,
+            tid,
+            0x07,
+            0x80,
+            trace,
+            parse_razer_battery,
+        ) {
             trace.push(format!("      电量读取成功：{level}% · tid={tid:#04X}"));
             battery = Some((level, tid));
             break;
@@ -458,7 +569,15 @@ fn read_razer(info: &HidInterface, trace: &mut Vec<String>) -> Option<VendorRead
         trace.push("    未获得有效 Razer 电量回复".to_string());
         return None;
     };
-    let charging = razer_query(info, report_len, used_tid, 0x07, 0x84, trace, parse_razer_charging);
+    let charging = razer_query(
+        info,
+        report_len,
+        used_tid,
+        0x07,
+        0x84,
+        trace,
+        parse_razer_charging,
+    );
     let model = name.strip_prefix("Razer ").unwrap_or(name);
     Some(VendorReading {
         level,
@@ -651,8 +770,32 @@ fn compX_name(vid: u16, pid: u16) -> Option<(&'static str, Confidence)> {
         (0x3770, 0x0100) => ("Hitscan Hyperlight (USB)", community),
         (0x3710, 0x5406) => ("Pulsar X2 CrazyLight Mini (2.4G)", verified),
         (0x3710, 0x3414) => ("Pulsar X2 CrazyLight Mini (USB)", verified),
+        (0x3554, 0xFB3E) => ("VGN Dragonfly F2 Pro Max", community),
+        (0x3554, 0xFC03) => ("VXE Dragonfly R1 Pro", community),
+        (0x3554, 0xFC04) => ("VXE Dragonfly R1 Pro Max", community),
+        (0x3554, 0xFC05) => ("VXE Dragonfly R1 SE", community),
+        (0x3554, 0xFB24) => ("VGN Dragonfly F1", community),
+        (0x3554, 0xFB25) => ("VGN Dragonfly F1 Pro", community),
+        (0x3554, 0xFB26) => ("VGN Dragonfly F1 Pro Max", community),
+        (0x3554, 0xFB27) => ("VGN Dragonfly F1 MOBA", community),
         _ => return None,
     })
+}
+
+fn is_vgn_dragonfly(vid: u16, pid: u16) -> bool {
+    vid == 0x3554
+        && matches!(
+            pid,
+            0xFB3E | 0xFC03 | 0xFC04 | 0xFC05 | 0xFB24 | 0xFB25 | 0xFB26 | 0xFB27
+        )
+}
+
+fn vgn_collection_ok(info: &HidInterface) -> bool {
+    is_vgn_dragonfly(info.vendor_id, info.product_id)
+        && info.usage_page == 0xFF02
+        && info.usage == 0x0002
+        && info.input_len >= 17
+        && info.output_len >= 17
 }
 
 fn compX_17_frame() -> [u8; 17] {
@@ -662,6 +805,120 @@ fn compX_17_frame() -> [u8; 17] {
     let sum: u16 = frame[..16].iter().map(|b| *b as u16).sum();
     frame[16] = ((0x55u16.wrapping_sub(sum)) & 0xFF) as u8;
     frame
+}
+
+fn vgn_frame(command: u8, payload: &[u8]) -> [u8; 17] {
+    let mut frame = [0u8; 17];
+    frame[0] = 0x08;
+    frame[1] = command;
+    if !payload.is_empty() {
+        frame[5] = payload.len().min(10) as u8;
+        let count = (frame[5] as usize).min(payload.len());
+        frame[6..6 + count].copy_from_slice(&payload[..count]);
+    }
+    let sum: u16 = frame[..16].iter().map(|b| *b as u16).sum();
+    frame[16] = ((0x55u16.wrapping_sub(sum)) & 0xFF) as u8;
+    frame
+}
+
+fn vgn_parse_frame(reply: &[u8], command: u8) -> Option<[u8; 17]> {
+    if reply.len() < 17 {
+        return None;
+    }
+    let mut frame = [0u8; 17];
+    frame.copy_from_slice(&reply[..17]);
+    if frame[0] != 0x08 || frame[1] != command {
+        return None;
+    }
+    let sum: u16 = frame[..16].iter().map(|b| *b as u16).sum();
+    if frame[16] != ((0x55u16.wrapping_sub(sum)) & 0xFF) as u8 {
+        return None;
+    }
+    Some(frame)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct VgnReading {
+    level: u8,
+    charging: bool,
+    millivolts: u16,
+    cid: u8,
+    mid: u8,
+}
+
+fn vgn_query_with_io(
+    nonce: [u8; 4],
+    mut exchange: impl FnMut(&[u8], u32) -> Option<Vec<u8>>,
+) -> Option<VgnReading> {
+    let handshake_payload = [nonce[0], nonce[1], nonce[2], nonce[3], 0, 0, 0, 0];
+    let handshake = exchange(&vgn_frame(1, &handshake_payload), 300)
+        .and_then(|reply| vgn_parse_frame(&reply, 1))?;
+    let cid = handshake[10];
+    let mid = handshake[11];
+
+    exchange(&vgn_frame(2, &[1]), 200).and_then(|reply| vgn_parse_frame(&reply, 2))?;
+    let online = exchange(&vgn_frame(3, &[]), 300).and_then(|reply| vgn_parse_frame(&reply, 3))?;
+    if online[6] == 0 {
+        return None;
+    }
+    let battery = exchange(&vgn_frame(4, &[]), 400).and_then(|reply| vgn_parse_frame(&reply, 4))?;
+    if battery[6] > 100 {
+        return None;
+    }
+    Some(VgnReading {
+        level: battery[6],
+        charging: battery[7] == 1,
+        millivolts: u16::from_be_bytes([battery[8], battery[9]]),
+        cid,
+        mid,
+    })
+}
+
+fn vgn_model_name(pid: u16, cid: u8, mid: u8, fallback: &'static str) -> String {
+    match (cid, mid) {
+        (118, 11) => "VGN Dragonfly F2 Pro Max".to_owned(),
+        (118, 10) => "VGN Dragonfly F2 Pro".to_owned(),
+        (118, 9) => "VGN Dragonfly F2".to_owned(),
+        _ => {
+            let _ = pid;
+            fallback.to_owned()
+        }
+    }
+}
+
+fn read_vgn_dragonfly(info: &HidInterface, fallback: &'static str) -> Option<VendorReading> {
+    if !vgn_collection_ok(info) {
+        return None;
+    }
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .subsec_nanos()
+        .to_le_bytes();
+    let reading = hid::with_handle(&info.path, true, |handle| {
+        vgn_query_with_io(nonce, |request, timeout| {
+            for _ in 0..8 {
+                if hid::read_report(handle, 17, 0).is_none() {
+                    break;
+                }
+            }
+            if !hid::write_report(handle, request) {
+                return None;
+            }
+            hid::read_report(handle, 17, timeout)
+        })
+    })?;
+    let name = vgn_model_name(info.product_id, reading.cid, reading.mid, fallback);
+    Some(VendorReading {
+        level: reading.level,
+        charging: Some(reading.charging),
+        provider: "VGN Dragonfly handshake",
+        verification: Confidence::Community,
+        detail: format!("{name} · {} mV · cmd 1/2/3/4", reading.millivolts),
+        name: Some(name),
+        kind: Some(DeviceKind::Mouse),
+        key_suffix: Some(format!("vgn:{:04X}", info.product_id)),
+    })
 }
 
 fn compX_17_parse(reply: &[u8]) -> Option<(u8, bool, u16)> {
@@ -687,6 +944,9 @@ fn compX_17_parse(reply: &[u8]) -> Option<(u8, bool, u16)> {
 
 fn read_compX_17(info: &HidInterface) -> Option<VendorReading> {
     let (name, verification) = compX_name(info.vendor_id, info.product_id)?;
+    if is_vgn_dragonfly(info.vendor_id, info.product_id) {
+        return read_vgn_dragonfly(info, name);
+    }
     if info.output_len < 17 {
         return None;
     }
@@ -1090,8 +1350,7 @@ fn read_mchose_inverse(info: &HidInterface) -> Option<VendorReading> {
                     Duration::from_millis(120),
                 ) {
                     Ok(reply) => {
-                        if let Some(parsed) =
-                            parse_mchose_reply(&reply, report_id, info.vendor_id)
+                        if let Some(parsed) = parse_mchose_reply(&reply, report_id, info.vendor_id)
                         {
                             return Some(VendorReading {
                                 level: parsed.level,
@@ -1100,7 +1359,11 @@ fn read_mchose_inverse(info: &HidInterface) -> Option<VendorReading> {
                                 verification: Confidence::Community,
                                 detail: format!(
                                     "report {:#04X} · vid {:04X} model {:04X} flags {:02X} fw {:08X}",
-                                    report_id, info.vendor_id, parsed.model, parsed.flags, parsed.firmware
+                                    report_id,
+                                    info.vendor_id,
+                                    parsed.model,
+                                    parsed.flags,
+                                    parsed.firmware
                                 ),
                                 name: Some(name.to_owned()),
                                 kind: Some(DeviceKind::Mouse),
@@ -1278,6 +1541,10 @@ fn select_delux_path(group: &[&HidInterface]) -> Option<String> {
 }
 
 const LOGITECH_VID: u16 = 0x046D;
+const LOGITECH_PRO_X_PID: u16 = 0x0ABA;
+const LOGITECH_SW_ID: u8 = 0x08;
+const LOGITECH_PRO_X_SW_ID: u8 = 0x0B;
+const LOGITECH_PING_TOKEN: u8 = 0x5A;
 const F_ROOT: u16 = 0x0000;
 const F_NAME: u16 = 0x0005;
 const F_UNIFIED: u16 = 0x1004;
@@ -1285,21 +1552,48 @@ const F_STATUS: u16 = 0x1000;
 const F_VOLTAGE: u16 = 0x1001;
 const F_ADC: u16 = 0x1F20;
 const BATTERY_FEATURES: [u16; 4] = [F_UNIFIED, F_STATUS, F_VOLTAGE, F_ADC];
-const LOGITECH_RECEIVERS: [u16; 23] = [
-    0xC548, 0xC52B, 0xC532, 0xC52F, 0xC518, 0xC51A, 0xC51B, 0xC521, 0xC525, 0xC526,
-    0xC52E, 0xC531, 0xC534, 0xC535, 0xC537, 0xC539, 0xC53A, 0xC53D, 0xC53F, 0xC541,
-    0xC545, 0xC547, 0xC54D,
+const LOGITECH_RECEIVERS: [u16; 25] = [
+    0xC548, 0xC52B, 0xC532, 0xC52F, 0xC518, 0xC51A, 0xC51B, 0xC521, 0xC525, 0xC526, 0xC52E, 0xC531,
+    0xC534, 0xC535, 0xC537, 0xC539, 0xC53A, 0xC53D, 0xC53F, 0xC541, 0xC542, 0xC545, 0xC547, 0xC54D,
+    0xC54F,
 ];
 // Solaar/OpenLogi's 13-point curve. Linux uses a different 100-point curve for
 // 0x1F20 (3905 mV is about 87% there vs 67% here); keep one documented curve
 // until a hardware comparison decides between them.
 const VOLTAGE_CURVE: [(u16, u8); 13] = [
-    (4186, 100), (4067, 90), (3989, 80), (3922, 70), (3859, 60), (3811, 50),
-    (3778, 40), (3751, 30), (3717, 20), (3671, 10), (3646, 5), (3579, 2), (3500, 0),
+    (4186, 100),
+    (4067, 90),
+    (3989, 80),
+    (3922, 70),
+    (3859, 60),
+    (3811, 50),
+    (3778, 40),
+    (3751, 30),
+    (3717, 20),
+    (3671, 10),
+    (3646, 5),
+    (3579, 2),
+    (3500, 0),
+];
+// G PRO X Wireless uses a different ADC discharge curve from generic HID++.
+const PRO_X_VOLTAGE_CURVE: [(u16, u8); 12] = [
+    (4200, 100),
+    (4100, 90),
+    (4000, 80),
+    (3900, 70),
+    (3800, 60),
+    (3777, 57),
+    (3750, 50),
+    (3700, 40),
+    (3650, 30),
+    (3600, 20),
+    (3550, 10),
+    (3500, 0),
 ];
 
 fn is_logitech_receiver(info: &HidInterface) -> bool {
     LOGITECH_RECEIVERS.contains(&info.product_id)
+        || (0xC500..=0xC5FF).contains(&info.product_id)
         || {
             let name = info.product.to_lowercase();
             name.contains("receiver")
@@ -1309,25 +1603,48 @@ fn is_logitech_receiver(info: &HidInterface) -> bool {
         }
 }
 
-fn hpp_request(
-    handle: windows::Win32::Foundation::HANDLE,
+fn logitech_slots(product_id: u16, receiver: bool) -> Vec<u8> {
+    if !receiver {
+        vec![0xFF]
+    } else if matches!(product_id, 0xC52B | 0xC542) {
+        (1..=6).collect()
+    } else {
+        (1..=2).collect()
+    }
+}
+
+fn hpp_report(
     long: bool,
     idx: u8,
     feature: u8,
     function: u8,
+    software_id: u8,
     params: &[u8],
-) -> Option<Vec<u8>> {
+) -> Vec<u8> {
     let len = if long { 20 } else { 7 };
     let mut request = vec![0u8; len];
     request[0] = if long { 0x11 } else { 0x10 };
     request[1] = idx;
     request[2] = feature;
-    request[3] = (function << 4) | 0x0A;
+    request[3] = (function << 4) | (software_id & 0x0F);
     for (i, byte) in params.iter().enumerate() {
         if 4 + i < len {
             request[4 + i] = *byte;
         }
     }
+    request
+}
+
+fn hpp_request_with_swid(
+    handle: windows::Win32::Foundation::HANDLE,
+    long: bool,
+    idx: u8,
+    feature: u8,
+    function: u8,
+    software_id: u8,
+    params: &[u8],
+) -> Option<Vec<u8>> {
+    let request = hpp_report(long, idx, feature, function, software_id, params);
     if !hid::write_report(handle, &request) {
         return None;
     }
@@ -1339,7 +1656,7 @@ fn hpp_request(
         if reply.len() < 4 || reply[1] != idx {
             continue;
         }
-        let function_byte = (function << 4) | 0x0A;
+        let function_byte = (function << 4) | (software_id & 0x0F);
         if reply[2] == feature && reply[3] == function_byte {
             let mut payload = reply[4..].to_vec();
             payload.resize(16, 0);
@@ -1352,16 +1669,86 @@ fn hpp_request(
     None
 }
 
+fn hpp_request(
+    handle: windows::Win32::Foundation::HANDLE,
+    long: bool,
+    idx: u8,
+    feature: u8,
+    function: u8,
+    params: &[u8],
+) -> Option<Vec<u8>> {
+    hpp_request_with_swid(handle, long, idx, feature, function, LOGITECH_SW_ID, params)
+}
+
+fn hpp_ping(
+    handle: windows::Win32::Foundation::HANDLE,
+    long: bool,
+    idx: u8,
+    function: u8,
+    software_id: u8,
+) -> bool {
+    hpp_request_with_swid(
+        handle,
+        long,
+        idx,
+        0x00,
+        function,
+        software_id,
+        &[0x00, 0x00, LOGITECH_PING_TOKEN],
+    )
+    .and_then(|payload| payload.get(2).copied())
+        == Some(LOGITECH_PING_TOKEN)
+}
+
+fn hpp_feature_index_with_swid(
+    handle: windows::Win32::Foundation::HANDLE,
+    long: bool,
+    idx: u8,
+    feature: u16,
+    software_id: u8,
+) -> u8 {
+    let params = [(feature >> 8) as u8, (feature & 0xFF) as u8];
+    hpp_request_with_swid(handle, long, idx, 0x00, 0, software_id, &params)
+        .and_then(|p| p.first().copied())
+        .unwrap_or(0)
+}
+
 fn hpp_feature_index(
     handle: windows::Win32::Foundation::HANDLE,
     long: bool,
     idx: u8,
     feature: u16,
 ) -> u8 {
-    let params = [(feature >> 8) as u8, (feature & 0xFF) as u8];
-    hpp_request(handle, long, idx, 0x00, 0, &params)
-        .and_then(|p| p.first().copied())
-        .unwrap_or(0)
+    hpp_feature_index_with_swid(handle, long, idx, feature, LOGITECH_SW_ID)
+}
+
+fn parse_logitech_hidpp10(payload: &[u8]) -> Option<(u8, Option<bool>)> {
+    let level = *payload.first()?;
+    if level > 100 {
+        return None;
+    }
+    let charging = *payload.get(1)?;
+    Some((level, Some(charging == 1)))
+}
+
+fn read_logitech_hidpp10(
+    handle: windows::Win32::Foundation::HANDLE,
+    idx: u8,
+) -> Option<(u8, Option<bool>)> {
+    let request = hpp_report(false, idx, 0x0D, 0, 0, &[]);
+    if !hid::write_report(handle, &request) {
+        return None;
+    }
+    let deadline = std::time::Instant::now() + Duration::from_millis(250);
+    while std::time::Instant::now() < deadline {
+        let Some(reply) = hid::read_report(handle, 64, 80) else {
+            continue;
+        };
+        if reply.len() >= 5 && reply[1] == idx && reply[2] == 0x0D {
+            return parse_logitech_hidpp10(&reply[3..]);
+        }
+    }
+    None
 }
 
 // 0x1000/0x1004 status: 0 discharging, 1 charging, 2 almost full, 3 full.
@@ -1439,11 +1826,11 @@ fn parse_logitech_adc(payload: &[u8]) -> Option<(u8, Option<bool>)> {
     Some((voltage_to_percent(mv), charging))
 }
 
-fn voltage_to_percent(mv: u16) -> u8 {
-    if mv >= VOLTAGE_CURVE[0].0 {
+fn curve_to_percent(mv: u16, curve: &[(u16, u8)]) -> u8 {
+    if mv >= curve[0].0 {
         return 100;
     }
-    for pair in VOLTAGE_CURVE.windows(2) {
+    for pair in curve.windows(2) {
         let (high_mv, high_pct) = pair[0];
         let (low_mv, low_pct) = pair[1];
         if mv >= low_mv {
@@ -1454,6 +1841,97 @@ fn voltage_to_percent(mv: u16) -> u8 {
         }
     }
     0
+}
+
+fn voltage_to_percent(mv: u16) -> u8 {
+    curve_to_percent(mv, &VOLTAGE_CURVE)
+}
+
+fn pro_x_voltage_to_percent(mv: u16) -> u8 {
+    curve_to_percent(mv, &PRO_X_VOLTAGE_CURVE)
+}
+
+fn parse_logitech_pro_x_adc(payload: &[u8]) -> Option<(u8, Option<bool>)> {
+    let mv = u16::from_be_bytes([*payload.first()?, *payload.get(1)?]);
+    if !(2500..=4300).contains(&mv) {
+        return None;
+    }
+    let flags = *payload.get(2)?;
+    if flags & 0x01 == 0 {
+        return None;
+    }
+    Some((pro_x_voltage_to_percent(mv), Some(flags & 0x02 != 0)))
+}
+
+fn logitech_model_name(pid: u16) -> Option<&'static str> {
+    match pid {
+        0x40BD | 0x40A9 => Some("Logitech G PRO X3 SUPERSTRIKE (GPW 5代)"),
+        0xC0A9 | 0xC0A8 => Some("Logitech G PRO X3 SUPERSTRIKE (GPW 5代 有线模式)"),
+        0x40B5 => Some("Logitech G PRO X SUPERLIGHT 2C (GPW 4代)"),
+        0xC0B5 => Some("Logitech G PRO X SUPERLIGHT 2C (GPW 4代 有线模式)"),
+        0x4093 => Some("Logitech G PRO X SUPERLIGHT 2"),
+        0xC098 => Some("Logitech G PRO X SUPERLIGHT 2 (有线模式)"),
+        0x4099 => Some("Logitech G PRO X SUPERLIGHT 2 DEX"),
+        0xC099 => Some("Logitech G PRO X SUPERLIGHT 2 DEX (有线模式)"),
+        0x40A4 => Some("Logitech G PRO 2 LIGHTSPEED"),
+        0xC0A4 => Some("Logitech G PRO 2 LIGHTSPEED (有线模式)"),
+        0x4092 | 0xC094 => Some("Logitech G PRO X SUPERLIGHT"),
+        0x4079 | 0xC088 => Some("Logitech G PRO Wireless (GPW)"),
+        0x408D => Some("Logitech G PRO Wireless (英雄联盟联名款)"),
+        0x407A | 0xC08C => Some("Logitech G PRO HERO 游戏鼠标"),
+        0xC076 => Some("Logitech G PRO 游戏鼠标 (经典3366版)"),
+        0x4087 | 0xC08D => Some("Logitech G502 LIGHTSPEED"),
+        0x408E | 0xC096 => Some("Logitech G502 X PLUS / LIGHTSPEED"),
+        0xC095 => Some("Logitech G502 X (有线版)"),
+        0xC08B => Some("Logitech G502 HERO (有线版)"),
+        0xC07D => Some("Logitech G502 Proteus Spectrum"),
+        0xC084 => Some("Logitech G203 / G102 Prodigy"),
+        0xC092 => Some("Logitech G203 / G102 LIGHTSYNC"),
+        0x4074 => Some("Logitech G304 / G305 LIGHTSPEED"),
+        0x409E => Some("Logitech G309 LIGHTSPEED"),
+        0x4070 => Some("Logitech G703 LIGHTSPEED (HERO)"),
+        0x4071 => Some("Logitech G903 LIGHTSPEED (HERO)"),
+        0x406E => Some("Logitech G604 LIGHTSPEED"),
+        0x4068 => Some("Logitech G603 LIGHTSPEED"),
+        0x4069 | 0xB023 => Some("Logitech MX Master 3"),
+        0x4090 => Some("Logitech MX Master 3S"),
+        0x408F => Some("Logitech MX Anywhere 3"),
+        0x406B => Some("Logitech MX Keys 无线键盘"),
+        0x408A => Some("Logitech MX Keys Mini"),
+        0x4082 => Some("Logitech G913 TKL 机械键盘"),
+        0x4086 => Some("Logitech G913 机械键盘"),
+        0x40A1 => Some("Logitech G915 X LIGHTSPEED 机械键盘"),
+        0x4098 => Some("Logitech G515 LIGHTSPEED TKL 机械键盘"),
+        0x409B => Some("Logitech G PRO X 60 游戏键盘"),
+        0x4088 => Some("Logitech G733 LIGHTSPEED 耳机"),
+        0x4097 => Some("Logitech G PRO X 2 LIGHTSPEED 耳机"),
+        0x408C | LOGITECH_PRO_X_PID => Some("Logitech G PRO X Wireless 游戏耳机"),
+        0x4085 => Some("Logitech G435 无线耳机"),
+        0x4080 => Some("Logitech G533 无线耳机"),
+        0x407B => Some("Logitech G935 无线耳机"),
+        0xC54F => Some("Logitech G PRO X3 SUPERSTRIKE 8K 接收器"),
+        0xC547 => Some("Logitech Lightspeed 游戏无线接收器 (0xC547)"),
+        0xC548 => Some("Logitech G PRO X SUPERLIGHT 2 4K/8K 接收器"),
+        0xC539 => Some("Logitech Lightspeed 游戏无线接收器"),
+        0xC53A => Some("Logitech POWERPLAY 无线充电系统"),
+        0xC545 => Some("Logitech G502 X LIGHTSPEED 接收器"),
+        0xC52B => Some("Logitech Unifying 优联接收器"),
+        0xC542 => Some("Logitech Bolt 安全商业接收器"),
+        _ => None,
+    }
+}
+
+fn logitech_kind_from_name(name: &str) -> Option<DeviceKind> {
+    let lower = name.to_lowercase();
+    if lower.contains("键盘") || lower.contains("keys") {
+        Some(DeviceKind::Keyboard)
+    } else if lower.contains("耳机") || lower.contains("headset") {
+        Some(DeviceKind::Headset)
+    } else if lower.contains("接收器") || lower.contains("powerplay") {
+        None
+    } else {
+        Some(DeviceKind::Mouse)
+    }
 }
 
 fn logitech_identity(
@@ -1480,7 +1958,9 @@ fn logitech_identity(
         raw.extend_from_slice(&chunk[..chunk.len().min(16)]);
         offset += 16;
     }
-    let name = String::from_utf8_lossy(&raw[..raw.len().min(length)]).trim().to_string();
+    let name = String::from_utf8_lossy(&raw[..raw.len().min(length)])
+        .trim()
+        .to_string();
     let kind = hpp_request(handle, long, idx, fi, 2, &[])
         .and_then(|p| p.first().copied())
         .map(|value| match value {
@@ -1493,12 +1973,19 @@ fn logitech_identity(
 }
 
 fn read_logitech_slot(info: &HidInterface, idx: u8) -> Option<VendorReading> {
-    let long = info.output_len >= 20 || info.feature_len >= 20;
     hid::with_handle(&info.path, true, |handle| {
-        if hpp_request(handle, long, idx, 0x00, 1, &[]).is_none() {
+        let long = if hpp_ping(handle, true, idx, 1, LOGITECH_SW_ID) {
+            true
+        } else if hpp_ping(handle, false, idx, 1, LOGITECH_SW_ID) {
+            false
+        } else if hpp_ping(handle, true, idx, 0, 0) {
+            true
+        } else {
             return None;
-        }
+        };
         let (name, kind) = logitech_identity(handle, long, idx);
+        let name = name.or_else(|| logitech_model_name(info.product_id).map(str::to_owned));
+        let kind = kind.or_else(|| name.as_deref().and_then(logitech_kind_from_name));
         for feature in BATTERY_FEATURES {
             let fi = hpp_feature_index(handle, long, idx, feature);
             if fi == 0 {
@@ -1521,15 +2008,56 @@ fn read_logitech_slot(info: &HidInterface, idx: u8) -> Option<VendorReading> {
             return Some(VendorReading {
                 level,
                 charging,
-                provider: "Logitech HID++",
-                verification: Confidence::Verified,
+                provider: "Logitech HID++ 2.0",
+                verification: Confidence::Community,
                 detail: format!("feature {:04X} · slot {}", feature, idx),
                 name,
                 kind,
                 key_suffix: Some(format!("logitech:{}", idx)),
             });
         }
-        None
+        read_logitech_hidpp10(handle, idx).map(|(level, charging)| VendorReading {
+            level,
+            charging,
+            provider: "Logitech HID++ 1.0",
+            verification: Confidence::Community,
+            detail: format!("register 0x0D · slot {}", idx),
+            name,
+            kind,
+            key_suffix: Some(format!("logitech:{}", idx)),
+        })
+    })
+}
+
+fn read_logitech_pro_x(info: &HidInterface) -> Option<VendorReading> {
+    if info.product_id != LOGITECH_PRO_X_PID
+        || info.usage_page != 0xFF43
+        || info.input_len < 7
+        || info.output_len < 7
+    {
+        return None;
+    }
+    hid::with_handle(&info.path, true, |handle| {
+        if !hpp_ping(handle, true, 0xFF, 1, LOGITECH_PRO_X_SW_ID) {
+            return None;
+        }
+        let feature = hpp_feature_index_with_swid(handle, true, 0xFF, F_ADC, LOGITECH_PRO_X_SW_ID);
+        if feature == 0 {
+            return None;
+        }
+        let payload =
+            hpp_request_with_swid(handle, true, 0xFF, feature, 0, LOGITECH_PRO_X_SW_ID, &[])?;
+        let (level, charging) = parse_logitech_pro_x_adc(&payload)?;
+        Some(VendorReading {
+            level,
+            charging,
+            provider: "Logitech G PRO X HID++",
+            verification: Confidence::Community,
+            detail: "FF43 · feature 1F20".to_string(),
+            name: logitech_model_name(LOGITECH_PRO_X_PID).map(str::to_owned),
+            kind: Some(DeviceKind::Headset),
+            key_suffix: Some("logitech:0ABA".to_string()),
+        })
     })
 }
 
@@ -1537,14 +2065,12 @@ pub fn read_logitech(info: &HidInterface) -> Vec<VendorReading> {
     if info.usage_page < 0xFF00 {
         return Vec::new();
     }
+    if info.product_id == LOGITECH_PRO_X_PID {
+        return read_logitech_pro_x(info).into_iter().collect();
+    }
     let receiver = is_logitech_receiver(info);
-    let slots: Vec<u8> = if receiver {
-        (1..=6).collect()
-    } else {
-        vec![0xFF]
-    };
     let mut out = Vec::new();
-    for slot in slots {
+    for slot in logitech_slots(info.product_id, receiver) {
         if let Some(reading) = read_logitech_slot(info, slot) {
             out.push(reading);
         }
@@ -1555,17 +2081,21 @@ pub fn read_logitech(info: &HidInterface) -> Vec<VendorReading> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DeluxReading, LOGITECH_RECEIVERS, MchoseReading, PixArtReading, Razer0528Reply,
-        aula_checksum, aula_query, build_razer_request, compX_name, delux_candidate, delux_request,
-        is_compX_vid, mchose_candidate, mchose_request, normalize_razer_reply, parse_aula_battery,
-        parse_delux_reply, parse_logitech_adc, parse_logitech_battery_status,
+        DeluxReading, LOGITECH_PRO_X_SW_ID, LOGITECH_RECEIVERS, LOGITECH_SW_ID, MchoseReading,
+        PixArtReading, RAZER_MAX_READS, RAZER_MAX_SENDS, Razer0528Reply, VgnReading, aula_checksum,
+        aula_query, build_razer_request, compX_name, delux_candidate, delux_request, hpp_report,
+        is_compX_vid, is_logitech_receiver, is_vgn_dragonfly, logitech_kind_from_name,
+        logitech_model_name, logitech_slots, mchose_candidate, mchose_request,
+        normalize_razer_reply, parse_aula_battery, parse_delux_reply, parse_logitech_adc,
+        parse_logitech_battery_status, parse_logitech_hidpp10, parse_logitech_pro_x_adc,
         parse_logitech_unified, parse_logitech_voltage, parse_mchose_reply, parse_pixart_reply,
         parse_razer_0528, parse_razer_battery, parse_razer_charging, parse_vaxee_battery,
         parse_vaxee_charging, pixart_candidate, pixart_interface_ok, pixart_name,
-        pixart_product_ok, pixart_request, razer_0528_candidate, razer_0528_charging,
-        razer_0528_request, razer_name, razer_report_len, razer_transaction_ids,
-        razer_uses_special_protocol, select_oem_paths, vaxee_candidate, vaxee_request,
-        voltage_to_percent,
+        pixart_product_ok, pixart_request, pro_x_voltage_to_percent, razer_0528_candidate,
+        razer_0528_charging, razer_0528_request, razer_name, razer_query_with_io, razer_report_len,
+        razer_transaction_ids, razer_uses_special_protocol, select_oem_paths, vaxee_candidate,
+        vaxee_request, vgn_collection_ok, vgn_frame, vgn_model_name, vgn_parse_frame,
+        vgn_query_with_io, voltage_to_percent,
     };
     use crate::hid::HidInterface;
     use anybattery_core::Confidence;
@@ -1638,6 +2168,7 @@ mod tests {
         assert!(razer_uses_special_protocol(0x0528));
         assert!(razer_uses_special_protocol(0x0557));
         assert!(razer_uses_special_protocol(0x053A));
+        assert!(razer_uses_special_protocol(0x0552));
         assert!(razer_uses_special_protocol(0x0555));
         assert!(razer_uses_special_protocol(0x0556));
         assert!(!razer_uses_special_protocol(0x0558));
@@ -1936,6 +2467,90 @@ mod tests {
         );
     }
 
+    #[derive(Clone, Debug, Default)]
+    struct FakeRazerIo {
+        sends: usize,
+        reads: usize,
+        answer_on: usize,
+        answered: bool,
+        busy_first: bool,
+    }
+
+    fn fake_razer_query(
+        answer_on: usize,
+        busy_first: bool,
+    ) -> (Option<u8>, FakeRazerIo, Vec<String>) {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let state = Rc::new(RefCell::new(FakeRazerIo {
+            answer_on,
+            busy_first,
+            ..Default::default()
+        }));
+        let set_state = Rc::clone(&state);
+        let get_state = Rc::clone(&state);
+        let request = build_razer_request(91, 0x1F, 0x07, 0x80).unwrap();
+        let mut trace = Vec::new();
+        let result = razer_query_with_io(
+            &request,
+            0x07,
+            0x80,
+            &mut trace,
+            parse_razer_battery,
+            move |_| {
+                set_state.borrow_mut().sends += 1;
+                Ok(())
+            },
+            move |_| {
+                let mut state = get_state.borrow_mut();
+                state.reads += 1;
+                if state.busy_first && state.reads == 1 {
+                    return Ok(razer_reply(91, 0x01, 0x07, 0x80, 0));
+                }
+                if state.answer_on > 0 && state.sends >= state.answer_on && !state.answered {
+                    state.answered = true;
+                    Ok(razer_reply(91, 0x02, 0x07, 0x80, 128))
+                } else {
+                    Ok(razer_reply(91, 0x02, 0x0F, 0x03, 0))
+                }
+            },
+            |_| {},
+        );
+        let final_state = state.borrow().clone();
+        (result, final_state, trace)
+    }
+
+    #[test]
+    fn razer_query_reads_a_normal_reply_once() {
+        let (level, io, _) = fake_razer_query(1, false);
+        assert_eq!(level, Some(50));
+        assert_eq!((io.sends, io.reads), (1, 1));
+    }
+
+    #[test]
+    fn razer_query_polls_busy_without_resending() {
+        let (level, io, _) = fake_razer_query(1, true);
+        assert_eq!(level, Some(50));
+        assert_eq!((io.sends, io.reads), (1, 2));
+    }
+
+    #[test]
+    fn razer_query_resends_after_four_foreign_replies() {
+        let (level, io, trace) = fake_razer_query(2, false);
+        assert_eq!(level, Some(50));
+        assert_eq!((io.sends, io.reads), (2, 5));
+        assert!(trace.iter().any(|line| line.contains("重发请求")));
+    }
+
+    #[test]
+    fn razer_query_bounds_foreign_reply_storm_and_reports_contention() {
+        let (level, io, trace) = fake_razer_query(0, false);
+        assert_eq!(level, None);
+        assert_eq!((io.sends, io.reads), (RAZER_MAX_SENDS, RAZER_MAX_READS));
+        assert!(trace.iter().any(|line| line.contains("Synapse/Chroma")));
+    }
+
     fn hid_interface(
         vendor_id: u16,
         product_id: u16,
@@ -1951,6 +2566,85 @@ mod tests {
             feature_len,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn vgn_dragonfly_collection_and_names_cover_only_known_models() {
+        for pid in [
+            0xFB3E, 0xFC03, 0xFC04, 0xFC05, 0xFB24, 0xFB25, 0xFB26, 0xFB27,
+        ] {
+            assert!(is_vgn_dragonfly(0x3554, pid));
+            assert_eq!(
+                compX_name(0x3554, pid).map(|entry| entry.1),
+                Some(Confidence::Community)
+            );
+        }
+        assert!(!is_vgn_dragonfly(0x3554, 0xF508));
+        let mut info = hid_interface(0x3554, 0xFB3E, 0xFF02, 0x0002, 0);
+        info.input_len = 17;
+        info.output_len = 17;
+        assert!(vgn_collection_ok(&info));
+        info.usage = 1;
+        assert!(!vgn_collection_ok(&info));
+        assert_eq!(
+            vgn_model_name(0xFB3E, 118, 9, "fallback"),
+            "VGN Dragonfly F2"
+        );
+        assert_eq!(vgn_model_name(0xFB3E, 0, 0, "fallback"), "fallback");
+    }
+
+    #[test]
+    fn vgn_dragonfly_session_runs_handshake_status_online_then_battery() {
+        let mut replies = vec![
+            vgn_frame(1, &[0, 0, 0, 0, 118, 11]).to_vec(),
+            vgn_frame(2, &[1]).to_vec(),
+            vgn_frame(3, &[1]).to_vec(),
+            vgn_frame(4, &[73, 1, 0x0F, 0xA0]).to_vec(),
+        ]
+        .into_iter();
+        let mut writes = Vec::new();
+        let reading = vgn_query_with_io([1, 2, 3, 4], |request, _| {
+            writes.push(request.to_vec());
+            replies.next()
+        });
+        assert_eq!(
+            reading,
+            Some(VgnReading {
+                level: 73,
+                charging: true,
+                millivolts: 4000,
+                cid: 118,
+                mid: 11,
+            })
+        );
+        let commands: Vec<u8> = writes.iter().map(|frame| frame[1]).collect();
+        assert_eq!(commands, vec![1, 2, 3, 4]);
+        assert_eq!(&writes[0][6..10], &[1, 2, 3, 4]);
+        assert!(writes.iter().all(|frame| frame.len() == 17));
+    }
+
+    #[test]
+    fn vgn_dragonfly_rejects_bad_checksum_and_stops_when_offline() {
+        let mut bad = vgn_frame(4, &[80, 0]);
+        bad[16] ^= 1;
+        assert_eq!(vgn_parse_frame(&bad, 4), None);
+        assert_eq!(vgn_parse_frame(&vgn_frame(3, &[1]), 4), None);
+
+        let mut replies = vec![
+            vgn_frame(1, &[0; 6]).to_vec(),
+            vgn_frame(2, &[1]).to_vec(),
+            vgn_frame(3, &[0]).to_vec(),
+        ]
+        .into_iter();
+        let mut writes = 0;
+        assert_eq!(
+            vgn_query_with_io([0; 4], |_, _| {
+                writes += 1;
+                replies.next()
+            }),
+            None
+        );
+        assert_eq!(writes, 3, "offline receivers must not be asked for battery");
     }
 
     fn razer_0528_frame(first: [u8; 16]) -> [u8; 64] {
@@ -2144,19 +2838,46 @@ mod tests {
 
     #[test]
     fn vaxee_battery_uses_five_percent_steps() {
-        assert_eq!(parse_vaxee_battery(&vaxee_reply([0x0E, 0xA5, 0x0B], 20)), Some(100));
-        assert_eq!(parse_vaxee_battery(&vaxee_reply([0x0E, 0xA5, 0x0B], 16)), Some(80));
-        assert_eq!(parse_vaxee_battery(&vaxee_reply([0x0E, 0xA5, 0x0B], 1)), Some(5));
-        assert_eq!(parse_vaxee_battery(&vaxee_reply([0x0E, 0xA5, 0x0B], 0)), Some(0));
+        assert_eq!(
+            parse_vaxee_battery(&vaxee_reply([0x0E, 0xA5, 0x0B], 20)),
+            Some(100)
+        );
+        assert_eq!(
+            parse_vaxee_battery(&vaxee_reply([0x0E, 0xA5, 0x0B], 16)),
+            Some(80)
+        );
+        assert_eq!(
+            parse_vaxee_battery(&vaxee_reply([0x0E, 0xA5, 0x0B], 1)),
+            Some(5)
+        );
+        assert_eq!(
+            parse_vaxee_battery(&vaxee_reply([0x0E, 0xA5, 0x0B], 0)),
+            Some(0)
+        );
     }
 
     #[test]
     fn vaxee_battery_rejects_bad_header_length_and_range() {
-        assert_eq!(parse_vaxee_battery(&vaxee_reply([0x0E, 0xA5, 0x0B], 21)), None);
-        assert_eq!(parse_vaxee_battery(&vaxee_reply([0x0E, 0xA5, 0x0B], 100)), None);
-        assert_eq!(parse_vaxee_battery(&vaxee_reply([0x0E, 0xA5, 0x0C], 20)), None);
-        assert_eq!(parse_vaxee_battery(&vaxee_reply([0x0E, 0xA4, 0x0B], 20)), None);
-        assert_eq!(parse_vaxee_battery(&vaxee_reply([0x0D, 0xA5, 0x0B], 20)), None);
+        assert_eq!(
+            parse_vaxee_battery(&vaxee_reply([0x0E, 0xA5, 0x0B], 21)),
+            None
+        );
+        assert_eq!(
+            parse_vaxee_battery(&vaxee_reply([0x0E, 0xA5, 0x0B], 100)),
+            None
+        );
+        assert_eq!(
+            parse_vaxee_battery(&vaxee_reply([0x0E, 0xA5, 0x0C], 20)),
+            None
+        );
+        assert_eq!(
+            parse_vaxee_battery(&vaxee_reply([0x0E, 0xA4, 0x0B], 20)),
+            None
+        );
+        assert_eq!(
+            parse_vaxee_battery(&vaxee_reply([0x0D, 0xA5, 0x0B], 20)),
+            None
+        );
         assert_eq!(parse_vaxee_battery(&[0u8; 64]), None);
         let full = vaxee_reply([0x0E, 0xA5, 0x0B], 20);
         assert_eq!(parse_vaxee_battery(&full[..63]), None);
@@ -2164,20 +2885,140 @@ mod tests {
 
     #[test]
     fn vaxee_charging_page_reports_only_zero_or_one() {
-        assert_eq!(parse_vaxee_charging(&vaxee_reply([0x0E, 0xA5, 0x10], 1)), Some(true));
-        assert_eq!(parse_vaxee_charging(&vaxee_reply([0x0E, 0xA5, 0x10], 0)), Some(false));
-        assert_eq!(parse_vaxee_charging(&vaxee_reply([0x0E, 0xA5, 0x10], 2)), None);
-        assert_eq!(parse_vaxee_charging(&vaxee_reply([0x0E, 0xA5, 0x0B], 1)), None);
-        assert_eq!(parse_vaxee_charging(&vaxee_reply([0x0E, 0xA4, 0x10], 1)), None);
-        assert_eq!(parse_vaxee_charging(&vaxee_reply([0x0E, 0xA5, 0x10], 1)[..63]), None);
+        assert_eq!(
+            parse_vaxee_charging(&vaxee_reply([0x0E, 0xA5, 0x10], 1)),
+            Some(true)
+        );
+        assert_eq!(
+            parse_vaxee_charging(&vaxee_reply([0x0E, 0xA5, 0x10], 0)),
+            Some(false)
+        );
+        assert_eq!(
+            parse_vaxee_charging(&vaxee_reply([0x0E, 0xA5, 0x10], 2)),
+            None
+        );
+        assert_eq!(
+            parse_vaxee_charging(&vaxee_reply([0x0E, 0xA5, 0x0B], 1)),
+            None
+        );
+        assert_eq!(
+            parse_vaxee_charging(&vaxee_reply([0x0E, 0xA4, 0x10], 1)),
+            None
+        );
+        assert_eq!(
+            parse_vaxee_charging(&vaxee_reply([0x0E, 0xA5, 0x10], 1)[..63]),
+            None
+        );
     }
 
     #[test]
-    fn logitech_lightspeed_receiver_ids_are_present() {
-        assert_eq!(LOGITECH_RECEIVERS.len(), 23);
-        for pid in [0xC545, 0xC547, 0xC54D] {
+    fn logitech_receiver_ids_and_slots_match_the_protocol_matrix() {
+        assert_eq!(LOGITECH_RECEIVERS.len(), 25);
+        for pid in [0xC542, 0xC545, 0xC547, 0xC54D, 0xC54F] {
             assert!(LOGITECH_RECEIVERS.contains(&pid), "{pid:#06X} missing");
         }
+        let mut range_receiver = HidInterface {
+            product_id: 0xC5AA,
+            ..HidInterface::default()
+        };
+        assert!(is_logitech_receiver(&range_receiver));
+        range_receiver.product_id = 0xC542;
+        assert!(is_logitech_receiver(&range_receiver));
+        assert_eq!(logitech_slots(0xC52B, true), vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(logitech_slots(0xC542, true), vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(logitech_slots(0xC54F, true), vec![1, 2]);
+        assert_eq!(logitech_slots(0xC5AA, true), vec![1, 2]);
+        assert_eq!(logitech_slots(0x4093, false), vec![0xFF]);
+    }
+
+    #[test]
+    fn logitech_ping_and_feature_frames_use_the_reference_software_ids() {
+        let long = hpp_report(true, 1, 0, 1, LOGITECH_SW_ID, &[0, 0, 0x5A]);
+        assert_eq!(long.len(), 20);
+        assert_eq!(&long[..7], &[0x11, 1, 0, 0x18, 0, 0, 0x5A]);
+        let short = hpp_report(false, 2, 0, 1, LOGITECH_SW_ID, &[0, 0, 0x5A]);
+        assert_eq!(short, vec![0x10, 2, 0, 0x18, 0, 0, 0x5A]);
+        let legacy = hpp_report(true, 1, 0, 0, 0, &[0, 0, 0x5A]);
+        assert_eq!(&legacy[..7], &[0x11, 1, 0, 0, 0, 0, 0x5A]);
+        let pro_x_ping = hpp_report(true, 0xFF, 0, 1, LOGITECH_PRO_X_SW_ID, &[0, 0, 0x5A]);
+        assert_eq!(&pro_x_ping[..7], &[0x11, 0xFF, 0, 0x1B, 0, 0, 0x5A]);
+        let pro_x_feature = hpp_report(true, 0xFF, 0, 0, LOGITECH_PRO_X_SW_ID, &[0x1F, 0x20]);
+        assert_eq!(&pro_x_feature[..6], &[0x11, 0xFF, 0, 0x0B, 0x1F, 0x20]);
+        assert_eq!(
+            hpp_report(false, 1, 0x0D, 0, 0, &[]),
+            vec![0x10, 1, 0x0D, 0, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn logitech_hidpp10_accepts_only_real_percentage_payloads() {
+        assert_eq!(parse_logitech_hidpp10(&[0, 0]), Some((0, Some(false))));
+        assert_eq!(parse_logitech_hidpp10(&[52, 1]), Some((52, Some(true))));
+        assert_eq!(parse_logitech_hidpp10(&[100, 2]), Some((100, Some(false))));
+        assert_eq!(parse_logitech_hidpp10(&[101, 1]), None);
+        assert_eq!(parse_logitech_hidpp10(&[52]), None);
+        assert_eq!(parse_logitech_hidpp10(&[]), None);
+    }
+
+    #[test]
+    fn logitech_pro_x_adc_requires_valid_voltage_and_flag() {
+        assert_eq!(
+            parse_logitech_pro_x_adc(&logitech_voltage_payload(3900, 0x01)),
+            Some((70, Some(false)))
+        );
+        assert_eq!(
+            parse_logitech_pro_x_adc(&logitech_voltage_payload(3900, 0x03)),
+            Some((70, Some(true)))
+        );
+        assert_eq!(
+            parse_logitech_pro_x_adc(&logitech_voltage_payload(3900, 0x02)),
+            None
+        );
+        assert_eq!(
+            parse_logitech_pro_x_adc(&logitech_voltage_payload(2499, 0x01)),
+            None
+        );
+        assert_eq!(
+            parse_logitech_pro_x_adc(&logitech_voltage_payload(4301, 0x01)),
+            None
+        );
+        assert_eq!(parse_logitech_pro_x_adc(&[0x0F, 0x3C]), None);
+    }
+
+    #[test]
+    fn logitech_pro_x_curve_is_independent_and_interpolated() {
+        assert_eq!(pro_x_voltage_to_percent(4300), 100);
+        assert_eq!(pro_x_voltage_to_percent(4200), 100);
+        assert_eq!(pro_x_voltage_to_percent(4050), 85);
+        assert_eq!(pro_x_voltage_to_percent(3777), 57);
+        assert_eq!(pro_x_voltage_to_percent(3500), 0);
+        assert_eq!(pro_x_voltage_to_percent(3499), 0);
+        assert_ne!(pro_x_voltage_to_percent(3905), voltage_to_percent(3905));
+    }
+
+    #[test]
+    fn logitech_model_fallback_does_not_replace_hidpp_identity() {
+        assert_eq!(
+            logitech_model_name(0x4093),
+            Some("Logitech G PRO X SUPERLIGHT 2")
+        );
+        assert_eq!(
+            logitech_model_name(0x0ABA),
+            Some("Logitech G PRO X Wireless 游戏耳机")
+        );
+        assert_eq!(
+            logitech_model_name(0xC542),
+            Some("Logitech Bolt 安全商业接收器")
+        );
+        assert_eq!(logitech_model_name(0xFFFF), None);
+        assert_eq!(
+            logitech_kind_from_name("Logitech MX Keys Mini"),
+            Some(anybattery_core::DeviceKind::Keyboard)
+        );
+        assert_eq!(
+            logitech_kind_from_name("Logitech G733 LIGHTSPEED 耳机"),
+            Some(anybattery_core::DeviceKind::Headset)
+        );
     }
 
     fn logitech_voltage_payload(mv: u16, flags: u8) -> [u8; 3] {
@@ -2211,7 +3052,10 @@ mod tests {
             parse_logitech_voltage(&logitech_voltage_payload(3990, 0x8F)),
             Some((80, None))
         );
-        assert_eq!(parse_logitech_voltage(&logitech_voltage_payload(2499, 0x80)), None);
+        assert_eq!(
+            parse_logitech_voltage(&logitech_voltage_payload(2499, 0x80)),
+            None
+        );
         assert_eq!(
             parse_logitech_voltage(&logitech_voltage_payload(2500, 0x80)),
             Some((0, Some(true)))
@@ -2232,14 +3076,8 @@ mod tests {
             parse_logitech_battery_status(&[42, 0, 1]),
             Some((42, Some(true)))
         );
-        assert_eq!(
-            parse_logitech_battery_status(&[42, 0, 4]),
-            Some((42, None))
-        );
-        assert_eq!(
-            parse_logitech_battery_status(&[42, 0, 7]),
-            Some((42, None))
-        );
+        assert_eq!(parse_logitech_battery_status(&[42, 0, 4]), Some((42, None)));
+        assert_eq!(parse_logitech_battery_status(&[42, 0, 7]), Some((42, None)));
         assert_eq!(parse_logitech_battery_status(&[101, 0, 0]), None);
         assert_eq!(parse_logitech_battery_status(&[42, 0, 8]), None);
         assert_eq!(parse_logitech_battery_status(&[42, 0]), None);
@@ -2247,18 +3085,9 @@ mod tests {
 
     #[test]
     fn logitech_unified_keeps_conflicting_status_unknown() {
-        assert_eq!(
-            parse_logitech_unified(&[42, 8, 4]),
-            Some((42, None))
-        );
-        assert_eq!(
-            parse_logitech_unified(&[42, 8, 5]),
-            Some((42, None))
-        );
-        assert_eq!(
-            parse_logitech_unified(&[42, 4, 3]),
-            Some((42, Some(true)))
-        );
+        assert_eq!(parse_logitech_unified(&[42, 8, 4]), Some((42, None)));
+        assert_eq!(parse_logitech_unified(&[42, 8, 5]), Some((42, None)));
+        assert_eq!(parse_logitech_unified(&[42, 4, 3]), Some((42, Some(true))));
         assert_eq!(parse_logitech_unified(&[0, 8, 3]), None);
         assert_eq!(parse_logitech_unified(&[101, 8, 0]), None);
         assert_eq!(parse_logitech_unified(&[42, 8, 8]), None);
@@ -2278,10 +3107,22 @@ mod tests {
             parse_logitech_adc(&logitech_voltage_payload(3905, 0x07)),
             Some((67, Some(true)))
         );
-        assert_eq!(parse_logitech_adc(&logitech_voltage_payload(3905, 0x0F)), None);
-        assert_eq!(parse_logitech_adc(&logitech_voltage_payload(3905, 0x02)), None);
-        assert_eq!(parse_logitech_adc(&logitech_voltage_payload(3905, 0x00)), None);
-        assert_eq!(parse_logitech_adc(&logitech_voltage_payload(2499, 0x01)), None);
+        assert_eq!(
+            parse_logitech_adc(&logitech_voltage_payload(3905, 0x0F)),
+            None
+        );
+        assert_eq!(
+            parse_logitech_adc(&logitech_voltage_payload(3905, 0x02)),
+            None
+        );
+        assert_eq!(
+            parse_logitech_adc(&logitech_voltage_payload(3905, 0x00)),
+            None
+        );
+        assert_eq!(
+            parse_logitech_adc(&logitech_voltage_payload(2499, 0x01)),
+            None
+        );
     }
 
     #[test]
@@ -2293,9 +3134,7 @@ mod tests {
 
     fn pixart_reply(marker: u8, charging: u8, level: u8) -> Vec<u8> {
         let mut raw = vec![0u8; 65];
-        raw[..9].copy_from_slice(&[
-            0x00, marker, 0x00, 0x02, 0x02, 0x00, 0x83, charging, level,
-        ]);
+        raw[..9].copy_from_slice(&[0x00, marker, 0x00, 0x02, 0x02, 0x00, 0x83, charging, level]);
         raw
     }
 
@@ -2328,9 +3167,8 @@ mod tests {
             assert_eq!(parse_pixart_reply(&pixart_reply(marker, 0, 50)), None);
         }
         let mut shifted = vec![0u8; 65];
-        shifted[..10].copy_from_slice(&[
-            0x00, 0x00, 0xA1, 0x00, 0x02, 0x02, 0x00, 0x83, 0x00, 0x50,
-        ]);
+        shifted[..10]
+            .copy_from_slice(&[0x00, 0x00, 0xA1, 0x00, 0x02, 0x02, 0x00, 0x83, 0x00, 0x50]);
         assert_eq!(parse_pixart_reply(&shifted), None);
 
         let mut bad_echo = pixart_reply(0xA1, 0, 50);
@@ -2405,10 +3243,7 @@ mod tests {
         assert!(pixart_interface_ok(&r5));
 
         let request = pixart_request();
-        assert_eq!(
-            &request[..7],
-            &[0x00, 0x00, 0x00, 0x02, 0x02, 0x00, 0x83]
-        );
+        assert_eq!(&request[..7], &[0x00, 0x00, 0x00, 0x02, 0x02, 0x00, 0x83]);
         assert!(request[7..].iter().all(|byte| *byte == 0));
     }
 
@@ -2450,12 +3285,12 @@ mod tests {
     }
 
     const MCHOSE_OK_100_DISCHARGING: [u8; 21] = [
-        0x11, 0xF9, 0xAC, 0xAD, 0xCE, 0xFF, 0xFD, 0xFA, 0xF8, 0xFF, 0xF6, 0x9B, 0xFF, 0x9B,
-        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0x11, 0xF9, 0xAC, 0xAD, 0xCE, 0xFF, 0xFD, 0xFA, 0xF8, 0xFF, 0xF6, 0x9B, 0xFF, 0x9B, 0xFF,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
     ];
     const MCHOSE_OK_100_CHARGING: [u8; 21] = [
-        0x11, 0xF9, 0xAC, 0xAD, 0xCE, 0xFF, 0xFD, 0xFA, 0xF8, 0xFF, 0xF6, 0x9B, 0xFE, 0x9B,
-        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0x11, 0xF9, 0xAC, 0xAD, 0xCE, 0xFF, 0xFD, 0xFA, 0xF8, 0xFF, 0xF6, 0x9B, 0xFE, 0x9B, 0xFF,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
     ];
 
     fn mchose_long(level: u8, charging: u8) -> Vec<u8> {
@@ -2552,18 +3387,35 @@ mod tests {
         bad_charge[12] = 0xFD;
         assert_eq!(parse_mchose_reply(&bad_charge, 0x11, 0x5253), None);
 
-        assert_eq!(parse_mchose_reply(&MCHOSE_OK_100_DISCHARGING, 0x11, 0x3837), None);
+        assert_eq!(
+            parse_mchose_reply(&MCHOSE_OK_100_DISCHARGING, 0x11, 0x3837),
+            None
+        );
     }
 
     #[test]
     fn mchose_candidate_uses_pid_whitelist_not_vid_family() {
-        assert!(mchose_candidate(&hid_interface(0x5253, 0x1020, 0xFF01, 1, 65)));
-        assert!(mchose_candidate(&hid_interface(0x3837, 0x100B, 0xFF01, 1, 65)));
-        assert!(!mchose_candidate(&hid_interface(0x3837, 0x600A, 0xFF01, 1, 65)));
-        assert!(!mchose_candidate(&hid_interface(0x5253, 0x9999, 0xFF01, 1, 65)));
-        assert!(!mchose_candidate(&hid_interface(0x2023, 0xF013, 0xFF01, 1, 65)));
-        assert!(!mchose_candidate(&hid_interface(0x5253, 0x1020, 0xFF0B, 0x104, 65)));
-        assert!(!mchose_candidate(&hid_interface(0x5253, 0x1020, 0xFF01, 0, 65)));
+        assert!(mchose_candidate(&hid_interface(
+            0x5253, 0x1020, 0xFF01, 1, 65
+        )));
+        assert!(mchose_candidate(&hid_interface(
+            0x3837, 0x100B, 0xFF01, 1, 65
+        )));
+        assert!(!mchose_candidate(&hid_interface(
+            0x3837, 0x600A, 0xFF01, 1, 65
+        )));
+        assert!(!mchose_candidate(&hid_interface(
+            0x5253, 0x9999, 0xFF01, 1, 65
+        )));
+        assert!(!mchose_candidate(&hid_interface(
+            0x2023, 0xF013, 0xFF01, 1, 65
+        )));
+        assert!(!mchose_candidate(&hid_interface(
+            0x5253, 0x1020, 0xFF0B, 0x104, 65
+        )));
+        assert!(!mchose_candidate(&hid_interface(
+            0x5253, 0x1020, 0xFF01, 0, 65
+        )));
 
         let request = mchose_request(0x11, 21);
         assert_eq!(request.len(), 21);

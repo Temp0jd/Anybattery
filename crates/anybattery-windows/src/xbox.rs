@@ -3,7 +3,7 @@ use anybattery_core::{
 };
 use windows::Gaming::Input::RawGameController;
 use windows::System::Power::BatteryStatus;
-use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
+use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize};
 
 pub fn enumerate(now: u64) -> Vec<DeviceSnapshot> {
     let _ = unsafe { RoInitialize(RO_INIT_MULTITHREADED) };
@@ -56,9 +56,9 @@ pub fn enumerate(now: u64) -> Vec<DeviceSnapshot> {
             _ => None,
         };
         let level = match (remaining, full) {
-            (Some(remaining), Some(full)) if full > 0 && remaining >= 0 => {
-                Some((((remaining as i64 * 100) + full as i64 / 2) / full as i64).clamp(0, 100) as u8)
-            }
+            (Some(remaining), Some(full)) if full > 0 && remaining >= 0 => Some(
+                (((remaining as i64 * 100) + full as i64 / 2) / full as i64).clamp(0, 100) as u8,
+            ),
             _ => None,
         };
 
@@ -72,7 +72,11 @@ pub fn enumerate(now: u64) -> Vec<DeviceSnapshot> {
                 Confidence::OsReported,
                 format!(
                     "VID {:04X} PID {:04X} · {} / {} mWh · {:?}",
-                    vendor, product, remaining.unwrap_or(0), full.unwrap_or(0), status
+                    vendor,
+                    product,
+                    remaining.unwrap_or(0),
+                    full.unwrap_or(0),
+                    status
                 ),
             ),
         )

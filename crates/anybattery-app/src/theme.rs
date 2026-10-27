@@ -127,18 +127,32 @@ pub fn install_fonts(ctx: &egui::Context) {
         regular.push(fallback.clone());
         bold.push(fallback.clone());
     }
-    fonts.families.insert(FontFamily::Proportional, regular.clone());
+    fonts
+        .families
+        .insert(FontFamily::Proportional, regular.clone());
     fonts.families.insert(FontFamily::Monospace, regular);
     fonts.families.insert(FontFamily::Name("bold".into()), bold);
     ctx.set_fonts(fonts);
 
     ctx.all_styles_mut(|style| {
         style.text_styles = [
-            (TextStyle::Small, FontId::new(12.0, FontFamily::Proportional)),
+            (
+                TextStyle::Small,
+                FontId::new(12.0, FontFamily::Proportional),
+            ),
             (TextStyle::Body, FontId::new(12.0, FontFamily::Proportional)),
-            (TextStyle::Button, FontId::new(12.0, FontFamily::Proportional)),
-            (TextStyle::Heading, FontId::new(24.0, FontFamily::Name("bold".into()))),
-            (TextStyle::Monospace, FontId::new(12.0, FontFamily::Monospace)),
+            (
+                TextStyle::Button,
+                FontId::new(12.0, FontFamily::Proportional),
+            ),
+            (
+                TextStyle::Heading,
+                FontId::new(24.0, FontFamily::Name("bold".into())),
+            ),
+            (
+                TextStyle::Monospace,
+                FontId::new(12.0, FontFamily::Monospace),
+            ),
         ]
         .into();
         style.spacing.item_spacing = Vec2::new(6.0, 6.0);
@@ -148,7 +162,11 @@ pub fn install_fonts(ctx: &egui::Context) {
 }
 
 pub fn apply_visuals(ctx: &egui::Context, p: Palette, animations: bool) {
-    let mut visuals = if p.dark { egui::Visuals::dark() } else { egui::Visuals::light() };
+    let mut visuals = if p.dark {
+        egui::Visuals::dark()
+    } else {
+        egui::Visuals::light()
+    };
     visuals.override_text_color = Some(p.text);
     visuals.panel_fill = Color32::TRANSPARENT;
     visuals.window_fill = p.card_solid;
@@ -174,8 +192,16 @@ pub fn apply_visuals(ctx: &egui::Context, p: Palette, animations: bool) {
     visuals.widgets.active.corner_radius = CornerRadius::ZERO;
     visuals.window_corner_radius = CornerRadius::ZERO;
     visuals.menu_corner_radius = CornerRadius::ZERO;
-    let theme = if p.dark { egui::Theme::Dark } else { egui::Theme::Light };
-    ctx.set_theme(if p.dark { egui::ThemePreference::Dark } else { egui::ThemePreference::Light });
+    let theme = if p.dark {
+        egui::Theme::Dark
+    } else {
+        egui::Theme::Light
+    };
+    ctx.set_theme(if p.dark {
+        egui::ThemePreference::Dark
+    } else {
+        egui::ThemePreference::Light
+    });
     ctx.set_visuals_of(theme, visuals);
     ctx.style_mut_of(theme, |style| {
         style.animation_time = if animations { 0.08 } else { 0.0 };
@@ -188,7 +214,10 @@ pub fn rich(value: impl Into<String>, size: f32, color: Color32, bold: bool) -> 
     } else {
         FontFamily::Proportional
     };
-    egui::RichText::new(value.into()).size(size).color(color).family(family)
+    egui::RichText::new(value.into())
+        .size(size)
+        .color(color)
+        .family(family)
 }
 
 /// Five semantic battery tiers. The boundaries are the single source for card cells and the
@@ -268,11 +297,17 @@ mod tests {
 
     fn channel(v: f32) -> f32 {
         let v = v / 255.0;
-        if v <= 0.039_28 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+        if v <= 0.039_28 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
     }
 
     fn luminance(c: Color32) -> f32 {
-        0.2126 * channel(c.r() as f32) + 0.7152 * channel(c.g() as f32) + 0.0722 * channel(c.b() as f32)
+        0.2126 * channel(c.r() as f32)
+            + 0.7152 * channel(c.g() as f32)
+            + 0.0722 * channel(c.b() as f32)
     }
 
     fn contrast(a: Color32, b: Color32) -> f32 {
@@ -294,7 +329,12 @@ mod tests {
                 (p.warning_text, p.warning_bg),
             ] {
                 let ratio = contrast(fg, bg);
-                assert!(ratio >= 4.5, "contrast {:.2} below 4.5 (dark={})", ratio, dark);
+                assert!(
+                    ratio >= 4.5,
+                    "contrast {:.2} below 4.5 (dark={})",
+                    ratio,
+                    dark
+                );
             }
         }
     }
@@ -340,7 +380,10 @@ mod tests {
                     if dark { "dark" } else { "light" },
                     contrast(colour, p.card)
                 );
-                assert!(colours.insert((colour.r(), colour.g(), colour.b())), "{tier:?} duplicates a colour");
+                assert!(
+                    colours.insert((colour.r(), colour.g(), colour.b())),
+                    "{tier:?} duplicates a colour"
+                );
             }
             assert_eq!(colours.len(), 5);
         }
@@ -362,7 +405,10 @@ mod tests {
                 (81, BatteryTier::Full),
                 (100, BatteryTier::Full),
             ] {
-                assert_eq!(battery_color_for_level(p, level), battery_tier_color(p, tier));
+                assert_eq!(
+                    battery_color_for_level(p, level),
+                    battery_tier_color(p, tier)
+                );
             }
         }
     }
@@ -373,7 +419,11 @@ mod tests {
         let snapped = snap_rect(1.5, rect);
         for v in [snapped.min.x, snapped.min.y, snapped.max.x, snapped.max.y] {
             let physical = v * 1.5;
-            assert!((physical - physical.round()).abs() < 1e-3, "{} not on grid", v);
+            assert!(
+                (physical - physical.round()).abs() < 1e-3,
+                "{} not on grid",
+                v
+            );
         }
     }
 }

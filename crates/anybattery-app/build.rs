@@ -23,7 +23,10 @@ fn main() {
     let source = fs::read_to_string(manifest.join("assets/anybattery-icon.pixels"))
         .expect("read assets/anybattery-icon.pixels");
     let grid = parse_pixel_map(&source);
-    let images: Vec<Vec<u8>> = ICON_SIZES.iter().map(|size| icon_dib(*size, &grid)).collect();
+    let images: Vec<Vec<u8>> = ICON_SIZES
+        .iter()
+        .map(|size| icon_dib(*size, &grid))
+        .collect();
 
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
     let ico = build_ico(&images);
@@ -42,7 +45,12 @@ fn parse_pixel_map(source: &str) -> Vec<Vec<char>> {
         .collect();
     assert_eq!(rows.len(), 16, "icon map must have exactly 16 rows");
     for (y, row) in rows.iter().enumerate() {
-        assert_eq!(row.len(), 16, "icon map row {} must have exactly 16 columns", y);
+        assert_eq!(
+            row.len(),
+            16,
+            "icon map row {} must have exactly 16 columns",
+            y
+        );
         for (x, ch) in row.iter().enumerate() {
             assert!(
                 matches!(*ch, '.' | '#' | 'w' | '1' | '2' | '3'),

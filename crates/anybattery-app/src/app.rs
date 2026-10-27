@@ -1,6 +1,11 @@
-use anybattery_core::{now_unix, BatteryStatus, DeviceSnapshot, Settings, Theme};
-use anybattery_windows::{scan, ScanResult, system};
-use crossbeam_channel::{unbounded, Receiver, Sender, TryRecvError};
+use crate::icons;
+use crate::storage;
+use crate::theme::{self, Palette};
+use crate::tray::TrayHandle;
+use crate::widgets;
+use anybattery_core::{BatteryStatus, DeviceSnapshot, Settings, Theme, now_unix};
+use anybattery_windows::{ScanResult, scan, system};
+use crossbeam_channel::{Receiver, Sender, TryRecvError, unbounded};
 use eframe::egui::{
     self, Align, Align2, CornerRadius, CursorIcon, FontId, Id, Layout, PointerButton, Pos2, Rect,
     RichText, Sense, Stroke, StrokeKind, Ui, UiBuilder, ViewportCommand, vec2,
@@ -8,11 +13,6 @@ use eframe::egui::{
 use std::cmp::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use crate::icons;
-use crate::storage;
-use crate::theme::{self, Palette};
-use crate::tray::TrayHandle;
-use crate::widgets;
 pub enum UiCommand {
     Toggle,
     Show,
@@ -276,7 +276,9 @@ impl AnyBatteryApp {
             .iter()
             .filter(|device| device.status.is_live() && device.percent().is_some())
             .collect();
-        let lowest = live.iter().min_by_key(|device| device.percent().unwrap_or(255));
+        let lowest = live
+            .iter()
+            .min_by_key(|device| device.percent().unwrap_or(255));
         let tooltip = match lowest {
             Some(device) => format!(
                 "AnyBattery · {} 台设备 · {} {}%",
@@ -387,11 +389,15 @@ impl AnyBatteryApp {
     }
     fn maybe_refresh_theme(&mut self, ctx: &egui::Context) {
         let mut dark = self.dark;
-        if self.settings.theme == Theme::System && self.last_theme_check.elapsed() > Duration::from_secs(2) {
+        if self.settings.theme == Theme::System
+            && self.last_theme_check.elapsed() > Duration::from_secs(2)
+        {
             self.last_theme_check = Instant::now();
             dark = theme::resolve_dark(self.settings.theme);
         }
-        if self.applied_dark != Some(dark) || self.applied_animations != Some(self.settings.animations) {
+        if self.applied_dark != Some(dark)
+            || self.applied_animations != Some(self.settings.animations)
+        {
             self.dark = dark;
             self.applied_dark = Some(dark);
             self.applied_animations = Some(self.settings.animations);
@@ -488,7 +494,11 @@ impl AnyBatteryApp {
             Pos2::new(bar.left() + 4.0, bar.top() + 4.0),
             Pos2::new(layout.right_edge() - 6.0, bar.bottom() - 2.0),
         );
-        let drag = ui.interact(drag_rect, Id::new("anybattery.titlebar.drag"), Sense::click_and_drag());
+        let drag = ui.interact(
+            drag_rect,
+            Id::new("anybattery.titlebar.drag"),
+            Sense::click_and_drag(),
+        );
         if drag.double_clicked_by(PointerButton::Primary) {
             ui.ctx()
                 .send_viewport_cmd(ViewportCommand::Maximized(!maximized));
@@ -544,7 +554,10 @@ impl AnyBatteryApp {
             ),
             (
                 ResizeDirection::NorthWest,
-                Rect::from_min_max(rect.min, Pos2::new(rect.left() + corner, rect.top() + corner)),
+                Rect::from_min_max(
+                    rect.min,
+                    Pos2::new(rect.left() + corner, rect.top() + corner),
+                ),
                 CursorIcon::ResizeNorthWest,
             ),
             (
@@ -573,15 +586,12 @@ impl AnyBatteryApp {
             ),
         ];
         for (index, (direction, area, cursor)) in edges.into_iter().enumerate() {
-            let response = ui.interact(
-                area,
-                Id::new(("anybattery.resize", index)),
-                Sense::click(),
-            );
+            let response = ui.interact(area, Id::new(("anybattery.resize", index)), Sense::click());
             if response.hovered() {
                 ui.ctx().set_cursor_icon(cursor);
                 if ui.input(|input| input.pointer.button_pressed(PointerButton::Primary)) {
-                    ui.ctx().send_viewport_cmd(ViewportCommand::BeginResize(direction));
+                    ui.ctx()
+                        .send_viewport_cmd(ViewportCommand::BeginResize(direction));
                 }
             }
         }
@@ -622,10 +632,15 @@ impl AnyBatteryApp {
                 .layout(Layout::right_to_left(Align::Center)),
         );
         if widgets::icon_button(&mut right, p, widgets::Glyph::Settings, "设置").clicked() {
-            self.page = if self.page == Page::Settings { Page::Devices } else { Page::Settings };
+            self.page = if self.page == Page::Settings {
+                Page::Devices
+            } else {
+                Page::Settings
+            };
         }
         let scanning = self.scanning;
-        if widgets::refresh_button(&mut right, p, scanning, self.animations).clicked() && !scanning {
+        if widgets::refresh_button(&mut right, p, scanning, self.animations).clicked() && !scanning
+        {
             self.request_scan();
         }
 
@@ -690,7 +705,10 @@ impl AnyBatteryApp {
                 let (rect, _) = ui.allocate_exact_size(vec2(width, 34.0), Sense::hover());
                 icons::pixel_frame(ui.painter(), rect, p.warning_bg, p.card_border);
                 ui.painter().rect_filled(
-                    Rect::from_min_size(Pos2::new(rect.left() + 10.0, rect.center().y - 6.0), vec2(12.0, 12.0)),
+                    Rect::from_min_size(
+                        Pos2::new(rect.left() + 10.0, rect.center().y - 6.0),
+                        vec2(12.0, 12.0),
+                    ),
                     CornerRadius::ZERO,
                     p.accent,
                 );
@@ -757,7 +775,15 @@ impl AnyBatteryApp {
             self.filter = Filter::All;
         }
         ui.add_space(2.0);
-        if widgets::footer(ui, p, self.settings.poll_secs, self.last_scan, self.scanning).clicked() {
+        if widgets::footer(
+            ui,
+            p,
+            self.settings.poll_secs,
+            self.last_scan,
+            self.scanning,
+        )
+        .clicked()
+        {
             self.page = Page::Diagnostics;
         }
     }
@@ -806,8 +832,15 @@ impl AnyBatteryApp {
                     self.poll_dragging = holding;
                     ui.horizontal(|ui| {
                         ui.add_space(10.0);
-                        for (label, value) in [("30 秒", 30u64), ("1 分钟", 60), ("5 分钟", 300), ("10 分钟", 600)] {
-                            if widgets::pill_button(ui, p, label, self.settings.poll_secs == value).clicked() {
+                        for (label, value) in [
+                            ("30 秒", 30u64),
+                            ("1 分钟", 60),
+                            ("5 分钟", 300),
+                            ("10 分钟", 600),
+                        ] {
+                            if widgets::pill_button(ui, p, label, self.settings.poll_secs == value)
+                                .clicked()
+                            {
                                 self.settings.poll_secs = value;
                                 self.save_settings();
                             }
@@ -820,9 +853,15 @@ impl AnyBatteryApp {
                 widgets::group(ui, p, |ui| {
                     let mut value = self.settings.notify_low_battery;
                     let mut changed = false;
-                    widgets::settings_row(ui, p, "低电量提醒", "面板顶部与托盘图标变化", |ui| {
-                        changed = widgets::toggle(ui, p, &mut value);
-                    });
+                    widgets::settings_row(
+                        ui,
+                        p,
+                        "低电量提醒",
+                        "面板顶部与托盘图标变化",
+                        |ui| {
+                            changed = widgets::toggle(ui, p, &mut value);
+                        },
+                    );
                     if changed {
                         self.settings.notify_low_battery = value;
                         self.save_settings();
@@ -845,7 +884,8 @@ impl AnyBatteryApp {
                             Theme::Dark => 2,
                         };
                         let width = (ui.available_width() - 10.0).max(120.0);
-                        let (seg_rect, _) = ui.allocate_exact_size(vec2(width, 34.0), Sense::hover());
+                        let (seg_rect, _) =
+                            ui.allocate_exact_size(vec2(width, 34.0), Sense::hover());
                         let mut child = ui.new_child(
                             UiBuilder::new()
                                 .max_rect(seg_rect)
@@ -880,18 +920,30 @@ impl AnyBatteryApp {
                 widgets::group(ui, p, |ui| {
                     let mut autostart = self.settings.autostart;
                     let mut changed = false;
-                    widgets::settings_row(ui, p, "开机自启", "登录 Windows 后自动运行", |ui| {
-                        changed = widgets::toggle(ui, p, &mut autostart);
-                    });
+                    widgets::settings_row(
+                        ui,
+                        p,
+                        "开机自启",
+                        "登录 Windows 后自动运行",
+                        |ui| {
+                            changed = widgets::toggle(ui, p, &mut autostart);
+                        },
+                    );
                     if changed {
                         self.apply_autostart(autostart);
                         self.save_settings();
                     }
                     let mut show_unknown = self.settings.show_unknown;
                     let mut changed = false;
-                    widgets::settings_row(ui, p, "显示无电池设备", "没有电量或未匹配协议时也列出", |ui| {
-                        changed = widgets::toggle(ui, p, &mut show_unknown);
-                    });
+                    widgets::settings_row(
+                        ui,
+                        p,
+                        "显示无电池设备",
+                        "没有电量或未匹配协议时也列出",
+                        |ui| {
+                            changed = widgets::toggle(ui, p, &mut show_unknown);
+                        },
+                    );
                     if changed {
                         self.settings.show_unknown = show_unknown;
                         self.save_settings();
@@ -921,7 +973,11 @@ impl AnyBatteryApp {
     fn diagnostics_page(&mut self, ui: &mut Ui, p: &Palette) {
         ui.add_space(10.0);
         ui.horizontal(|ui| {
-            let refresh_label = if self.scanning { "扫描中…" } else { "刷新" };
+            let refresh_label = if self.scanning {
+                "扫描中…"
+            } else {
+                "刷新"
+            };
             if widgets::pill_button_enabled(ui, p, refresh_label, false, !self.scanning).clicked() {
                 self.request_scan();
             }
@@ -1012,7 +1068,11 @@ impl AnyBatteryApp {
         let text = widgets::fit_text(ui, message, 12.0, false, rect.width() - 76.0);
         let text_width = ui
             .painter()
-            .layout_no_wrap(text.clone(), FontId::new(12.0, egui::FontFamily::Proportional), p.text)
+            .layout_no_wrap(
+                text.clone(),
+                FontId::new(12.0, egui::FontFamily::Proportional),
+                p.text,
+            )
             .size()
             .x;
         let width = (text_width + 32.0).min(rect.width() - 60.0).max(120.0);
@@ -1065,12 +1125,17 @@ impl eframe::App for AnyBatteryApp {
             return;
         }
         let p = theme::palette(self.dark);
-        let maximized = ui.ctx().input(|input| input.viewport().maximized.unwrap_or(false));
+        let maximized = ui
+            .ctx()
+            .input(|input| input.viewport().maximized.unwrap_or(false));
         self.paint_background(ui, &p);
         self.titlebar(ui, &p, maximized);
         let rect = ui.max_rect();
         let content = Rect::from_min_max(
-            Pos2::new(rect.left() + 16.0, rect.top() + widgets::TITLEBAR_HEIGHT + 12.0),
+            Pos2::new(
+                rect.left() + 16.0,
+                rect.top() + widgets::TITLEBAR_HEIGHT + 12.0,
+            ),
             Pos2::new(rect.right() - 16.0, rect.bottom() - 12.0),
         );
         let mut child = ui.new_child(
@@ -1098,7 +1163,11 @@ fn compare_devices_for_display(a: &DeviceSnapshot, b: &DeviceSnapshot) -> Orderi
     match (a.percent(), b.percent()) {
         (Some(a_level), Some(b_level)) => a_level
             .cmp(&b_level)
-            .then_with(|| b.updated_at_unix.unwrap_or(0).cmp(&a.updated_at_unix.unwrap_or(0)))
+            .then_with(|| {
+                b.updated_at_unix
+                    .unwrap_or(0)
+                    .cmp(&a.updated_at_unix.unwrap_or(0))
+            })
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
             .then_with(|| a.name.cmp(&b.name)),
         (Some(_), None) => Ordering::Less,

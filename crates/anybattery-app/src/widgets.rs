@@ -4,11 +4,9 @@ use eframe::egui::{
 };
 use std::time::{Duration, Instant};
 
-use anybattery_core::{
-    age_text, BatteryReading, BatteryStatus, CoarseLevel, DeviceSnapshot,
-};
 use crate::icons;
 use crate::theme::{self, Palette};
+use anybattery_core::{BatteryReading, BatteryStatus, CoarseLevel, DeviceSnapshot, age_text};
 
 pub const CARD_HEIGHT: f32 = 78.0;
 
@@ -20,7 +18,11 @@ const SCAN_REPAINT_SECS: f32 = 0.2;
 /// Animation time used by this crate's custom transitions.
 /// Zero when the user turned animations off, so every value jumps straight to its target.
 fn animation_secs(ui: &Ui) -> f32 {
-    if ui.style().animation_time > 0.0 { ANIMATION_SECS } else { 0.0 }
+    if ui.style().animation_time > 0.0 {
+        ANIMATION_SECS
+    } else {
+        0.0
+    }
 }
 
 /// Shortest text that still fits `max_width`, measured with the real font at `size`.
@@ -28,7 +30,11 @@ fn animation_secs(ui: &Ui) -> f32 {
 /// Used for every long label so fixed character counts can never let mixed CJK/Latin text
 /// spill into a neighbouring column.
 pub fn fit_text(ui: &Ui, value: &str, size: f32, bold: bool, max_width: f32) -> String {
-    let family = if bold { FontFamily::Name("bold".into()) } else { FontFamily::Proportional };
+    let family = if bold {
+        FontFamily::Name("bold".into())
+    } else {
+        FontFamily::Proportional
+    };
     let font = FontId::new(size, family);
     let width = |text: &str| {
         ui.ctx().fonts_mut(|fonts| {
@@ -101,17 +107,16 @@ pub fn device_card(ui: &mut Ui, p: &Palette, device: &DeviceSnapshot, now: u64) 
     let right = rect.right() - 12.0;
     let reading_width = match device.battery {
         BatteryReading::Percent { level, .. } => percent_text_width(ui, level).max(BAR_WIDTH),
-        BatteryReading::Coarse { level } => {
-            ui.painter()
-                .layout_no_wrap(
-                    level.label_zh().to_owned(),
-                    FontId::new(18.0, FontFamily::Name("bold".into())),
-                    p.secondary,
-                )
-                .size()
-                .x
-                .max(BAR_WIDTH)
-        }
+        BatteryReading::Coarse { level } => ui
+            .painter()
+            .layout_no_wrap(
+                level.label_zh().to_owned(),
+                FontId::new(18.0, FontFamily::Name("bold".into())),
+                p.secondary,
+            )
+            .size()
+            .x
+            .max(BAR_WIDTH),
         BatteryReading::Unknown => BAR_WIDTH,
     };
     let left = rect.left() + 56.0;
@@ -129,10 +134,24 @@ pub fn device_card(ui: &mut Ui, p: &Palette, device: &DeviceSnapshot, now: u64) 
     // rely on colour alone.
     if let Some(label) = status_badge(device.status) {
         let font = FontId::new(10.0, FontFamily::Proportional);
-        let badge = Rect::from_min_size(Pos2::new(rect.left() + 10.0, rect.top() + 50.0), vec2(30.0, 14.0));
+        let badge = Rect::from_min_size(
+            Pos2::new(rect.left() + 10.0, rect.top() + 50.0),
+            vec2(30.0, 14.0),
+        );
         painter.rect_filled(badge, CornerRadius::ZERO, p.control);
-        painter.rect_stroke(badge, CornerRadius::ZERO, Stroke::new(1.0, p.card_border), StrokeKind::Inside);
-        painter.text(badge.center(), Align2::CENTER_CENTER, label, font, p.secondary);
+        painter.rect_stroke(
+            badge,
+            CornerRadius::ZERO,
+            Stroke::new(1.0, p.card_border),
+            StrokeKind::Inside,
+        );
+        painter.text(
+            badge.center(),
+            Align2::CENTER_CENTER,
+            label,
+            font,
+            p.secondary,
+        );
     }
     painter.text(
         Pos2::new(left, rect.top() + 48.0),
@@ -161,11 +180,9 @@ pub fn device_card(ui: &mut Ui, p: &Palette, device: &DeviceSnapshot, now: u64) 
             // Keyed by device, not list position, so sorting or filtering cannot hand one
             // device's animation state to another.
             let fill_id = Id::new(("device-percent-fill", device.id.0.as_str()));
-            let shown = ui.ctx().animate_value_with_time(
-                fill_id,
-                target,
-                animation_secs(ui),
-            );
+            let shown = ui
+                .ctx()
+                .animate_value_with_time(fill_id, target, animation_secs(ui));
             pixel_battery(painter, p, bar, shown, color);
         }
         BatteryReading::Coarse { level } => {
@@ -303,7 +320,12 @@ fn pixel_battery(painter: &egui::Painter, p: &Palette, rect: Rect, fill: f32, co
         let cell = theme::snap_rect(painter.ctx().pixels_per_point(), cell);
         let fill = if i < filled { color } else { p.track };
         painter.rect_filled(cell, CornerRadius::ZERO, fill);
-        painter.rect_stroke(cell, CornerRadius::ZERO, Stroke::new(1.0, p.card_border), StrokeKind::Inside);
+        painter.rect_stroke(
+            cell,
+            CornerRadius::ZERO,
+            Stroke::new(1.0, p.card_border),
+            StrokeKind::Inside,
+        );
     }
 }
 
@@ -327,7 +349,12 @@ fn coarse_pixel_battery(painter: &egui::Painter, p: &Palette, rect: Rect, level:
             CornerRadius::ZERO,
             if i < filled { p.secondary } else { p.track },
         );
-        painter.rect_stroke(cell, CornerRadius::ZERO, Stroke::new(1.0, p.card_border), StrokeKind::Inside);
+        painter.rect_stroke(
+            cell,
+            CornerRadius::ZERO,
+            Stroke::new(1.0, p.card_border),
+            StrokeKind::Inside,
+        );
     }
 }
 
@@ -345,21 +372,35 @@ pub fn segment(ui: &mut Ui, p: &Palette, labels: &[&str], selected: usize) -> Se
     icons::pixel_frame(painter, rect, p.control, p.card_border);
     let seg_width = (rect.width() - 4.0) / labels.len() as f32;
     let marker_id = ui.id().with("segment-indicator");
-    let shown = ui.ctx().animate_value_with_time(marker_id, selected as f32, animation_secs(ui));
+    let shown = ui
+        .ctx()
+        .animate_value_with_time(marker_id, selected as f32, animation_secs(ui));
     let marker = Rect::from_min_size(
         Pos2::new(rect.left() + 2.0 + shown * seg_width, rect.top() + 2.0),
         vec2(seg_width, rect.height() - 4.0),
     );
-    painter.rect_filled(theme::snap_rect(ui.ctx().pixels_per_point(), marker), CornerRadius::ZERO, p.accent);
+    painter.rect_filled(
+        theme::snap_rect(ui.ctx().pixels_per_point(), marker),
+        CornerRadius::ZERO,
+        p.accent,
+    );
     let mut result = SegmentResult::None;
     for (index, label) in labels.iter().enumerate() {
         let seg = Rect::from_min_size(
-            Pos2::new(rect.left() + 2.0 + index as f32 * seg_width, rect.top() + 2.0),
+            Pos2::new(
+                rect.left() + 2.0 + index as f32 * seg_width,
+                rect.top() + 2.0,
+            ),
             vec2(seg_width, rect.height() - 4.0),
         );
         let response = ui.interact(seg, Id::new(("segment", label, index)), Sense::click());
         let on_accent = index == selected;
-        let hover = if on_accent { 1.0 } else { ui.ctx().animate_bool(response.id.with("hover"), response.hovered()) };
+        let hover = if on_accent {
+            1.0
+        } else {
+            ui.ctx()
+                .animate_bool(response.id.with("hover"), response.hovered())
+        };
         painter.text(
             theme::snap_rect(ui.ctx().pixels_per_point(), seg).center(),
             Align2::CENTER_CENTER,
@@ -442,7 +483,11 @@ pub fn caption_button(
     let response = ui.interact(rect, Id::new(("caption", tooltip)), Sense::click());
     let hover = ui.ctx().animate_bool(response.id, response.hovered());
     let pressed = response.is_pointer_button_down_on();
-    let hover_fill = if destructive { p.red.gamma_multiply(0.85) } else { p.hover };
+    let hover_fill = if destructive {
+        p.red.gamma_multiply(0.85)
+    } else {
+        p.hover
+    };
     let fill = if pressed {
         Some(if destructive { p.red } else { p.accent })
     } else if hover > 0.0 {
@@ -469,13 +514,26 @@ pub fn icon_button(ui: &mut Ui, p: &Palette, glyph: Glyph, tooltip: &str) -> Res
     let rect = theme::snap_rect(ui.ctx().pixels_per_point(), rect);
     let hover = ui.ctx().animate_bool(response.id, response.hovered());
     if hover > 0.0 {
-        icons::pixel_frame(ui.painter(), rect, p.hover.gamma_multiply(hover), p.card_border);
+        icons::pixel_frame(
+            ui.painter(),
+            rect,
+            p.hover.gamma_multiply(hover),
+            p.card_border,
+        );
     }
     draw_glyph(
         ui.painter(),
         rect,
         glyph,
-        theme::lerp_color(p.secondary, p.text, hover.max(if response.is_pointer_button_down_on() { 1.0 } else { 0.0 })),
+        theme::lerp_color(
+            p.secondary,
+            p.text,
+            hover.max(if response.is_pointer_button_down_on() {
+                1.0
+            } else {
+                0.0
+            }),
+        ),
     );
     response.on_hover_text(tooltip)
 }
@@ -484,14 +542,29 @@ pub fn icon_button(ui: &mut Ui, p: &Palette, glyph: Glyph, tooltip: &str) -> Res
 pub fn refresh_button(ui: &mut Ui, p: &Palette, scanning: bool, animations: bool) -> Response {
     // While scanning the control is a status indicator, not a button: no click sense and no
     // pointing-hand cursor, so it cannot promise an action that intentionally does nothing.
-    let sense = if scanning { Sense::hover() } else { Sense::click() };
+    let sense = if scanning {
+        Sense::hover()
+    } else {
+        Sense::click()
+    };
     let (rect, response) = ui.allocate_exact_size(vec2(30.0, 28.0), sense);
     let rect = theme::snap_rect(ui.ctx().pixels_per_point(), rect);
-    let hover = ui.ctx().animate_bool(response.id.with("hover"), response.hovered());
+    let hover = ui
+        .ctx()
+        .animate_bool(response.id.with("hover"), response.hovered());
     if hover > 0.0 {
-        icons::pixel_frame(ui.painter(), rect, p.hover.gamma_multiply(hover), p.card_border);
+        icons::pixel_frame(
+            ui.painter(),
+            rect,
+            p.hover.gamma_multiply(hover),
+            p.card_border,
+        );
     }
-    let color = if scanning { p.accent } else { theme::lerp_color(p.secondary, p.text, hover) };
+    let color = if scanning {
+        p.accent
+    } else {
+        theme::lerp_color(p.secondary, p.text, hover)
+    };
     let painter = ui.painter();
     if scanning {
         // Four-step rotation around the frame; one step per 200 ms, so idle cost is bounded
@@ -499,7 +572,8 @@ pub fn refresh_button(ui: &mut Ui, p: &Palette, scanning: bool, animations: bool
         let step = if animations {
             let t = ui.input(|i| i.time);
             let step = ((t / SCAN_REPAINT_SECS as f64) as i64).rem_euclid(4);
-            ui.ctx().request_repaint_after(Duration::from_secs_f32(SCAN_REPAINT_SECS));
+            ui.ctx()
+                .request_repaint_after(Duration::from_secs_f32(SCAN_REPAINT_SECS));
             step
         } else {
             0
@@ -522,7 +596,11 @@ pub fn refresh_button(ui: &mut Ui, p: &Palette, scanning: bool, animations: bool
     } else {
         draw_glyph(painter, rect, Glyph::Refresh, color);
     }
-    let response = response.on_hover_text(if scanning { "正在扫描…" } else { "立即刷新" });
+    let response = response.on_hover_text(if scanning {
+        "正在扫描…"
+    } else {
+        "立即刷新"
+    });
     if scanning {
         response
     } else {
@@ -535,16 +613,46 @@ fn draw_glyph(painter: &egui::Painter, rect: Rect, glyph: Glyph, color: Color32)
     let stroke = Stroke::new(2.0, color);
     match glyph {
         Glyph::Refresh => {
-            painter.line_segment([Pos2::new(c.x - 6.0, c.y - 3.0), Pos2::new(c.x - 6.0, c.y + 3.0)], stroke);
-            painter.line_segment([Pos2::new(c.x - 6.0, c.y - 3.0), Pos2::new(c.x + 5.0, c.y - 3.0)], stroke);
-            painter.line_segment([Pos2::new(c.x + 5.0, c.y - 3.0), Pos2::new(c.x + 5.0, c.y + 3.0)], stroke);
-            painter.line_segment([Pos2::new(c.x + 5.0, c.y + 3.0), Pos2::new(c.x - 6.0, c.y + 3.0)], stroke);
-            painter.line_segment([Pos2::new(c.x + 1.0, c.y), Pos2::new(c.x + 6.0, c.y)], stroke);
+            painter.line_segment(
+                [
+                    Pos2::new(c.x - 6.0, c.y - 3.0),
+                    Pos2::new(c.x - 6.0, c.y + 3.0),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(c.x - 6.0, c.y - 3.0),
+                    Pos2::new(c.x + 5.0, c.y - 3.0),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(c.x + 5.0, c.y - 3.0),
+                    Pos2::new(c.x + 5.0, c.y + 3.0),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(c.x + 5.0, c.y + 3.0),
+                    Pos2::new(c.x - 6.0, c.y + 3.0),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(c.x + 1.0, c.y), Pos2::new(c.x + 6.0, c.y)],
+                stroke,
+            );
         }
         Glyph::Settings => {
             for (offset, knob) in [(-5.0f32, -2.0f32), (0.0, 3.0), (5.0, -3.0)] {
                 let y = c.y + offset;
-                painter.line_segment([Pos2::new(c.x - 7.0, y), Pos2::new(c.x + 7.0, y)], Stroke::new(2.0, color));
+                painter.line_segment(
+                    [Pos2::new(c.x - 7.0, y), Pos2::new(c.x + 7.0, y)],
+                    Stroke::new(2.0, color),
+                );
                 painter.rect_filled(
                     Rect::from_center_size(Pos2::new(c.x + knob, y), vec2(4.0, 6.0)),
                     CornerRadius::ZERO,
@@ -553,12 +661,21 @@ fn draw_glyph(painter: &egui::Painter, rect: Rect, glyph: Glyph, color: Color32)
             }
         }
         Glyph::Back => {
-            painter.line_segment([Pos2::new(c.x - 2.0, c.y - 6.0), Pos2::new(c.x - 8.0, c.y)], stroke);
-            painter.line_segment([Pos2::new(c.x - 8.0, c.y), Pos2::new(c.x - 2.0, c.y + 6.0)], stroke);
+            painter.line_segment(
+                [Pos2::new(c.x - 2.0, c.y - 6.0), Pos2::new(c.x - 8.0, c.y)],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(c.x - 8.0, c.y), Pos2::new(c.x - 2.0, c.y + 6.0)],
+                stroke,
+            );
         }
         Glyph::Minimize => {
             painter.line_segment(
-                [Pos2::new(c.x - 5.0, c.y + 4.0), Pos2::new(c.x + 5.0, c.y + 4.0)],
+                [
+                    Pos2::new(c.x - 5.0, c.y + 4.0),
+                    Pos2::new(c.x + 5.0, c.y + 4.0),
+                ],
                 stroke,
             );
         }
@@ -586,11 +703,17 @@ fn draw_glyph(painter: &egui::Painter, rect: Rect, glyph: Glyph, color: Color32)
         }
         Glyph::Close => {
             painter.line_segment(
-                [Pos2::new(c.x - 5.0, c.y - 5.0), Pos2::new(c.x + 5.0, c.y + 5.0)],
+                [
+                    Pos2::new(c.x - 5.0, c.y - 5.0),
+                    Pos2::new(c.x + 5.0, c.y + 5.0),
+                ],
                 stroke,
             );
             painter.line_segment(
-                [Pos2::new(c.x + 5.0, c.y - 5.0), Pos2::new(c.x - 5.0, c.y + 5.0)],
+                [
+                    Pos2::new(c.x + 5.0, c.y - 5.0),
+                    Pos2::new(c.x - 5.0, c.y + 5.0),
+                ],
                 stroke,
             );
         }
@@ -607,15 +730,33 @@ pub fn toggle(ui: &mut Ui, p: &Palette, value: &mut bool) -> bool {
     let track_color = theme::lerp_color(p.control, p.green, t);
     icons::pixel_frame(ui.painter(), rect, track_color, p.card_border);
     let knob = Rect::from_min_size(
-        Pos2::new(rect.left() + 3.0 + t * (rect.width() - 22.0), rect.top() + 3.0),
+        Pos2::new(
+            rect.left() + 3.0 + t * (rect.width() - 22.0),
+            rect.top() + 3.0,
+        ),
         vec2(16.0, 16.0),
     );
-    ui.painter().rect_filled(theme::snap_rect(ui.ctx().pixels_per_point(), knob), CornerRadius::ZERO, p.card_solid);
-    ui.painter().rect_stroke(knob, CornerRadius::ZERO, Stroke::new(2.0, p.card_border), StrokeKind::Inside);
+    ui.painter().rect_filled(
+        theme::snap_rect(ui.ctx().pixels_per_point(), knob),
+        CornerRadius::ZERO,
+        p.card_solid,
+    );
+    ui.painter().rect_stroke(
+        knob,
+        CornerRadius::ZERO,
+        Stroke::new(2.0, p.card_border),
+        StrokeKind::Inside,
+    );
     response.on_hover_cursor(CursorIcon::PointingHand).clicked()
 }
 
-pub fn settings_row(ui: &mut Ui, p: &Palette, title: &str, detail: &str, control: impl FnOnce(&mut Ui)) {
+pub fn settings_row(
+    ui: &mut Ui,
+    p: &Palette,
+    title: &str,
+    detail: &str,
+    control: impl FnOnce(&mut Ui),
+) {
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(width, 52.0), Sense::hover());
     // Control column is reserved first; the text column gets whatever is left.
@@ -674,7 +815,11 @@ pub fn pill_button_enabled(
     selected: bool,
     enabled: bool,
 ) -> Response {
-    let fill = if selected && enabled { p.accent } else { p.control };
+    let fill = if selected && enabled {
+        p.accent
+    } else {
+        p.control
+    };
     let color = if !enabled {
         p.tertiary
     } else if selected {
@@ -709,7 +854,10 @@ pub fn footer(
     let (rect, _) = ui.allocate_exact_size(vec2(width, 40.0), Sense::hover());
     let painter = ui.painter();
     painter.line_segment(
-        [Pos2::new(rect.left(), rect.top() + 1.0), Pos2::new(rect.right(), rect.top() + 1.0)],
+        [
+            Pos2::new(rect.left(), rect.top() + 1.0),
+            Pos2::new(rect.right(), rect.top() + 1.0),
+        ],
         Stroke::new(2.0, p.card_border),
     );
     let button_rect = Rect::from_min_size(
@@ -722,7 +870,11 @@ pub fn footer(
         Align2::LEFT_CENTER,
         fit_text(
             ui,
-            &format!("每 {} / {}", interval_text(poll_secs), scan_age_text(last_scan, scanning)),
+            &format!(
+                "每 {} / {}",
+                interval_text(poll_secs),
+                scan_age_text(last_scan, scanning)
+            ),
             12.0,
             false,
             text_width,
@@ -731,7 +883,9 @@ pub fn footer(
         if scanning { p.text } else { p.tertiary },
     );
     let response = ui.interact(button_rect, Id::new("footer.diagnostics"), Sense::click());
-    let hover = ui.ctx().animate_bool(response.id.with("hover"), response.hovered());
+    let hover = ui
+        .ctx()
+        .animate_bool(response.id.with("hover"), response.hovered());
     icons::pixel_frame(
         painter,
         button_rect,
@@ -813,7 +967,10 @@ mod titlebar_tests {
             for button in [layout.minimize, layout.maximize, layout.close] {
                 assert_eq!(button.width(), CAPTION_BUTTON_SIZE);
                 assert_eq!(button.height(), CAPTION_BUTTON_SIZE);
-                assert!(bar.contains_rect(button), "button outside title bar at {width}");
+                assert!(
+                    bar.contains_rect(button),
+                    "button outside title bar at {width}"
+                );
             }
             assert!(layout.minimize.right() < layout.maximize.left());
             assert!(layout.maximize.right() < layout.close.left());

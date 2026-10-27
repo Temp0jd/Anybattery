@@ -1,4 +1,3 @@
-
 use anybattery_core::{Confidence, DeviceKind};
 use std::time::{Duration, Instant};
 
@@ -14,6 +13,7 @@ trait VendorTransport {
     fn write_output(&mut self, report: &[u8]) -> bool;
     fn read_input(&mut self, length: usize, timeout_ms: u32) -> Option<Vec<u8>>;
     fn set_feature(&mut self, report: &[u8]) -> bool;
+    fn get_feature(&mut self, report_id: u8, length: usize) -> Option<Vec<u8>>;
 
     fn drain(&mut self, length: usize, timeout_ms: u32, attempts: usize) {
         for _ in 0..attempts {
@@ -38,6 +38,10 @@ impl VendorTransport for HandleTransport {
     fn set_feature(&mut self, report: &[u8]) -> bool {
         hid::feature_set_on(self.0, report)
     }
+
+    fn get_feature(&mut self, report_id: u8, length: usize) -> Option<Vec<u8>> {
+        hid::feature_get_on(self.0, report_id, length)
+    }
 }
 
 /// How much of `window` is left before `deadline`, or None when it passed.
@@ -55,6 +59,38 @@ fn bounded_timeout(window: Duration, read_timeout_ms: u32) -> u32 {
 pub fn read_vendor_extra(info: &hid::HidInterface) -> Vec<VendorReading> {
     if let Some(reading) = read_controller(info) {
         return vec![reading];
+    }
+    if matches!(info.vendor_id, 0x05AC | 0x004C) {
+        if let Some(reading) = read_apple_magic(info) {
+            return vec![reading];
+        }
+    }
+    if info.vendor_id == 0x37D7 {
+        if let Some(reading) = read_flydigi(info) {
+            return vec![reading];
+        }
+    }
+    if info.vendor_id == 0x054C {
+        let readings = read_sony_inzone(info);
+        if !readings.is_empty() {
+            return readings;
+        }
+    }
+    if info.vendor_id == 0x19F5 {
+        if let Some(reading) = read_nuphy(info) {
+            return vec![reading];
+        }
+    }
+    if info.vendor_id == 0x24AE {
+        if let Some(reading) = read_rapoo(info) {
+            return vec![reading];
+        }
+    }
+    if matches!(info.vendor_id, 0x374A | 0x3151 | 0x347A) {
+        let readings = read_valkyrie(info);
+        if !readings.is_empty() {
+            return readings;
+        }
     }
     if is_1d57_status_interface(info) {
         if let Some(reading) = read_1d57_mouse(info) {
@@ -86,14 +122,29 @@ pub fn read_vendor_extra(info: &hid::HidInterface) -> Vec<VendorReading> {
             return vec![reading];
         }
     }
+    if info.vendor_id == 0x3837 && info.product_id == 0x3033 {
+        if let Some(reading) = read_mchose_g87(info) {
+            return vec![reading];
+        }
+    }
+    if matches!(info.vendor_id, 0x0E8D | 0x35A1) {
+        if let Some(reading) = read_angry_miao(info) {
+            return vec![reading];
+        }
+    }
     if info.vendor_id == 0x1038 && info.usage_page == 0xFFC0 {
         if let Some(reading) = read_steelseries(info) {
             return vec![reading];
         }
     }
-    if info.vendor_id == 0x03F0 && info.usage_page == 0xFF90 && info.usage == 0x0303 {
-        if let Some(reading) = read_hyperx(info) {
+    if info.vendor_id == 0x03F0 {
+        if let Some(reading) = read_hyperx_cloud3(info) {
             return vec![reading];
+        }
+        if info.usage_page == 0xFF90 && info.usage == 0x0303 {
+            if let Some(reading) = read_hyperx(info) {
+                return vec![reading];
+            }
         }
     }
     if info.vendor_id == 0x1B1C && info.is_vendor_collection() {
@@ -149,12 +200,30 @@ fn parse_steam_battery(report: &[u8]) -> Option<(u8, Option<bool>)> {
     (level <= 100).then_some((level, Some(charging)))
 }
 
+fn steam_disable_lizard_request() -> [u8; 64] {
+    let mut request = [0u8; 64];
+    // SDL's Triton driver: ID_SET_SETTINGS_VALUES, one ControllerSetting,
+    // SETTING_LIZARD_MODE = 9, LIZARD_MODE_OFF = 0 (little-endian u16).
+    request[..6].copy_from_slice(&[0x01, 0x87, 0x03, 0x09, 0x00, 0x00]);
+    request
+}
+
+fn steam_connection_state(report: &[u8]) -> Option<bool> {
+    match report.first().copied()? {
+        0x46 | 0x79 => match report.get(1).copied()? {
+            1 => Some(false),
+            2 => Some(true),
+            _ => None,
+        },
+        0x42 | 0x45 | 0x47 => Some(true),
+        _ => None,
+    }
+}
+
 fn read_steam(info: &hid::HidInterface) -> Option<VendorReading> {
-    let (name, puck) = match info.product_id {
-        0x1304 => ("Steam Controller Puck (Proteus)", true),
-        0x1305 => ("Steam Controller Puck (Nereid)", true),
-        0x1302 => ("Steam Controller (USB)", false),
-        0x1303 => ("Steam Controller (Bluetooth)", false),
+    let puck = match info.product_id {
+        0x1304 | 0x1305 => true,
+        0x1302 | 0x1303 => false,
         _ => return None,
     };
     if puck {
@@ -166,17 +235,63 @@ fn read_steam(info: &hid::HidInterface) -> Option<VendorReading> {
     if puck && info.usage_page < 0xFF00 && !(info.usage_page == 1 && info.usage == 5) {
         return None;
     }
-    let parsed = hid::listen(&info.path, 64, 5000, parse_steam_battery)?;
-    let key = format!("steam:{:04X}:{}", info.product_id, info.interface_number.unwrap_or(0));
+    if info.feature_len < 64 {
+        return None;
+    }
+    // Match SDL's Triton sequence: a Puck slot must report a connected
+    // controller before SET_SETTINGS_VALUES is sent. Empty or sleeping slots
+    // reject the Feature Set with ERROR_GEN_FAILURE. The firmware watchdog
+    // restores lizard mode automatically, so no persistent setting is changed.
+    let parsed = hid::with_handle(&info.path, true, |handle| {
+        let deadline = Instant::now() + Duration::from_millis(5000);
+        let mut connected = !puck;
+        let mut last_lizard_update: Option<Instant> = None;
+        while Instant::now() < deadline {
+            let due =
+                last_lizard_update.is_none_or(|last| last.elapsed() >= Duration::from_secs(3));
+            if connected && due {
+                let _ = hid::feature_set_on(handle, &steam_disable_lizard_request());
+                last_lizard_update = Some(Instant::now());
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let timeout = bounded_timeout(remaining, 150);
+            if let Some(report) = hid::read_report(handle, 64, timeout) {
+                if let Some(state) = steam_connection_state(&report) {
+                    if state && !connected {
+                        last_lizard_update = None;
+                    }
+                    connected = state;
+                }
+                if connected {
+                    if let Some(value) = parse_steam_battery(&report) {
+                        return Some(value);
+                    }
+                }
+            }
+        }
+        None
+    })?;
+    let key = format!(
+        "steam:{:04X}:{}",
+        info.product_id,
+        info.interface_number.unwrap_or(0)
+    );
+    let detail = match info.interface_number.filter(|_| puck) {
+        Some(iface) => format!("report 0x43 · Puck 槽位 {}", iface - 1),
+        None => "report 0x43".to_owned(),
+    };
     Some(reading(
         parsed.0,
         parsed.1,
         "Steam 输入报告",
-        Confidence::Verified,
-        Some(name.to_owned()),
+        Confidence::Community,
+        Some("Steam Controller".to_owned()),
         Some(DeviceKind::Controller),
         key,
-        "report 0x43".to_owned(),
+        detail,
     ))
 }
 
@@ -532,12 +647,24 @@ fn razer_pa_read_at(
         std::thread::sleep(settle);
     }
     let result = (|| {
-        let level = razer_pa_ask(io, layout, 0x21, settle, reply_window, reply_timeout_ms, |reply| {
-            parse_razer_pa_level(reply, layout, 0x21)
-        })?;
-        let charging = razer_pa_ask(io, layout, 0x2A, settle, reply_window, reply_timeout_ms, |reply| {
-            parse_razer_pa_charging(reply, layout)
-        });
+        let level = razer_pa_ask(
+            io,
+            layout,
+            0x21,
+            settle,
+            reply_window,
+            reply_timeout_ms,
+            |reply| parse_razer_pa_level(reply, layout, 0x21),
+        )?;
+        let charging = razer_pa_ask(
+            io,
+            layout,
+            0x2A,
+            settle,
+            reply_window,
+            reply_timeout_ms,
+            |reply| parse_razer_pa_charging(reply, layout),
+        );
         Some((level, charging))
     })();
     let _ = io.write_output(&razer_pa_remote(layout, false));
@@ -557,9 +684,110 @@ fn razer_pa_read(
     )
 }
 
+fn razer_x_control_request(sequence: u8, command: u8, args: &[u8]) -> Vec<u8> {
+    let mut frame = vec![0u8; 64];
+    frame[0] = 0x01;
+    frame[1] = 0x80;
+    frame[2] = (6 + args.len()) as u8;
+    frame[3..9].copy_from_slice(&[b'P', b'A', 0x0E, sequence, (1 + args.len()) as u8, command]);
+    frame[9..9 + args.len()].copy_from_slice(args);
+    frame
+}
+
+fn razer_x_ack(reply: &[u8], sequence: u8) -> Option<bool> {
+    if reply.len() < 16
+        || reply[0] != 0x01
+        || reply[1] != 0x80
+        || reply[3..6] != [b'P', b'I', 0x01]
+        || reply[13] != 0x0E
+        || reply[14] != (sequence | 0x80)
+    {
+        return None;
+    }
+    Some(reply[15] == 0)
+}
+
+fn razer_x_data(reply: &[u8], command: u8) -> Option<u8> {
+    if reply.len() < 15
+        || reply[0] != 0x01
+        || reply[1] != 0x80
+        || reply[3..6] != [b'P', b'I', 0x0E]
+        || reply[11] != 0x02
+        || reply[12] != 0x00
+        || reply[13] != command
+    {
+        return None;
+    }
+    Some(reply[14])
+}
+
+fn razer_x_control(
+    io: &mut impl VendorTransport,
+    sequence: u8,
+    command: u8,
+    args: &[u8],
+) -> Option<u8> {
+    for _ in 0..3 {
+        if !io.write_output(&razer_x_control_request(sequence, command, args)) {
+            return None;
+        }
+        let deadline = Instant::now() + Duration::from_millis(600);
+        let mut acknowledged = false;
+        let mut value = None;
+        while Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let timeout = bounded_timeout(remaining, 100);
+            let Some(reply) = io.read_input(65, timeout) else {
+                continue;
+            };
+            if let Some(success) = razer_x_ack(&reply, sequence) {
+                if !success {
+                    return None;
+                }
+                acknowledged = true;
+            }
+            if let Some(reply_value) = razer_x_data(&reply, command) {
+                value = Some(reply_value);
+            }
+            if acknowledged {
+                if let Some(value) = value {
+                    return Some(value);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn razer_x_read(io: &mut impl VendorTransport) -> Option<(u8, Option<bool>)> {
+    io.drain(65, 5, 32);
+    let linked = razer_x_control(io, 0x20, 0xE3, &[])?;
+    if linked != 1 {
+        return None;
+    }
+    let transport = razer_x_control(io, 0x21, 0xE6, &[])?;
+    if transport & 0x08 == 0 {
+        return None;
+    }
+    let route = razer_x_control(io, 0x22, 0xE0, &[])?;
+    if route != 0 {
+        return None;
+    }
+    razer_pa_read_at(
+        io,
+        RAZER_PA_BARRACUDA,
+        RAZER_PA_SETTLE,
+        Duration::from_millis(1000),
+        100,
+    )
+}
+
 fn razer_pa_collection_ok(product_id: u16, usage_page: u16) -> bool {
     match product_id {
-        0x053A => usage_page == 0xFF00,
+        0x053A | 0x0552 => usage_page == 0xFF00,
         0x0555 | 0x0556 => matches!(usage_page, 0xFF00 | 0xFF14),
         _ => false,
     }
@@ -568,6 +796,7 @@ fn razer_pa_collection_ok(product_id: u16, usage_page: u16) -> bool {
 fn read_razer_pa(info: &hid::HidInterface) -> Option<VendorReading> {
     let (name, layout) = match info.product_id {
         0x053A => ("Razer Barracuda Pro", RAZER_PA_BARRACUDA),
+        0x0552 => ("Razer Barracuda X (2022)", RAZER_PA_BARRACUDA),
         0x0555 | 0x0556 => ("Razer BlackShark V2 Pro (2023)", RAZER_PA_BLACKSHARK),
         _ => return None,
     };
@@ -578,7 +807,12 @@ fn read_razer_pa(info: &hid::HidInterface) -> Option<VendorReading> {
         return None;
     }
     let (level, charging) = hid::with_handle(&info.path, true, |handle| {
-        razer_pa_read(&mut HandleTransport(handle), layout)
+        let mut io = HandleTransport(handle);
+        if info.product_id == 0x0552 {
+            razer_x_read(&mut io)
+        } else {
+            razer_pa_read(&mut io, layout)
+        }
     })?;
     Some(reading(
         level,
@@ -715,7 +949,11 @@ fn read_keychron(info: &hid::HidInterface) -> Option<VendorReading> {
         None,
         "Keychron 0xB3/0xB4",
         Confidence::Community,
-        Some(if info.product.is_empty() { "Keychron Ultra-Link".to_owned() } else { info.product.clone() }),
+        Some(if info.product.is_empty() {
+            "Keychron Ultra-Link".to_owned()
+        } else {
+            info.product.clone()
+        }),
         Some(DeviceKind::Mouse),
         format!("keychron:{:04X}", info.product_id),
         "feature B3 06".to_owned(),
@@ -915,7 +1153,11 @@ fn read_steelseries(info: &hid::HidInterface) -> Option<VendorReading> {
                 None,
                 "SteelSeries AA",
                 Confidence::Unverified,
-                Some(if info.product.is_empty() { "SteelSeries 无线鼠标".to_owned() } else { info.product.clone() }),
+                Some(if info.product.is_empty() {
+                    "SteelSeries 无线鼠标".to_owned()
+                } else {
+                    info.product.clone()
+                }),
                 Some(DeviceKind::Mouse),
                 format!("steelseries:{:04X}", info.product_id),
                 "AA reply".to_owned(),
@@ -935,7 +1177,12 @@ fn read_hyperx(info: &hid::HidInterface) -> Option<VendorReading> {
     request[2] = 0xBB;
     request[3] = 0x02;
     let reply = hid::write_and_read(&info.path, &request, 52, 1000)?;
-    if reply.len() <= 7 || reply[0] != 0x06 || reply[1] != 0xFF || reply[2] != 0xBB || reply[3] != 0x02 {
+    if reply.len() <= 7
+        || reply[0] != 0x06
+        || reply[1] != 0xFF
+        || reply[2] != 0xBB
+        || reply[3] != 0x02
+    {
         return None;
     }
     let level = reply[7];
@@ -956,6 +1203,323 @@ fn read_hyperx(info: &hid::HidInterface) -> Option<VendorReading> {
         Some(DeviceKind::Headset),
         format!("hyperx:{:04X}", info.product_id),
         "06 FF BB 02".to_owned(),
+    ))
+}
+
+// HyperX Cloud III Wireless uses a different 62-byte 0x66 status channel.
+// Cloud III S (03F0:06BE) is deliberately not routed here.
+fn hyperx_cloud3_collection_ok(info: &hid::HidInterface) -> bool {
+    info.vendor_id == 0x03F0
+        && matches!(info.product_id, 0x05B7 | 0x0C9D)
+        && info.output_len == 62
+        && info.input_len >= 62
+}
+
+fn hyperx_cloud3_request(command: u8) -> [u8; 62] {
+    let mut request = [0u8; 62];
+    request[0] = 0x66;
+    request[1] = command;
+    request
+}
+
+#[derive(Default)]
+struct HyperXCloud3State {
+    connected: Option<bool>,
+    charging: Option<bool>,
+    level: Option<u8>,
+}
+
+fn parse_hyperx_cloud3(reply: &[u8], state: &mut HyperXCloud3State) -> bool {
+    if reply.len() < 5 || reply[0] != 0x66 {
+        return false;
+    }
+    match reply[1] {
+        0x82 | 0x0B => state.connected = Some(reply[2] == 1),
+        0x89 | 0x0D => {
+            // Both status bytes clear means that the receiver has no live
+            // headset reading; the level byte is not meaningful in that state.
+            if reply[2] != 0 || reply[3] != 0 {
+                if reply[4] > 100 {
+                    return false;
+                }
+                state.level = Some(reply[4]);
+            }
+        }
+        0x8A | 0x0C => match reply[2] {
+            0 => state.charging = Some(false),
+            1 => state.charging = Some(true),
+            2 => {
+                state.charging = Some(false);
+                state.level = Some(100);
+            }
+            _ => {}
+        },
+        _ => return false,
+    }
+    true
+}
+
+fn hyperx_cloud3_query(
+    io: &mut impl VendorTransport,
+    window: Duration,
+) -> Option<(u8, Option<bool>)> {
+    io.drain(62, 0, 8);
+    for command in [0x82, 0x8A, 0x89] {
+        if !io.write_output(&hyperx_cloud3_request(command)) {
+            return None;
+        }
+    }
+    let deadline = Instant::now() + window;
+    let mut state = HyperXCloud3State::default();
+    while let Some(remaining) = bounded_window(deadline, window) {
+        let timeout = bounded_timeout(remaining, 120);
+        let Some(reply) = io.read_input(62, timeout) else {
+            continue;
+        };
+        parse_hyperx_cloud3(&reply, &mut state);
+        if state.connected.is_some() && state.level.is_some() {
+            break;
+        }
+    }
+    if state.connected == Some(false) {
+        return None;
+    }
+    state.level.map(|level| (level, state.charging))
+}
+
+fn read_hyperx_cloud3(info: &hid::HidInterface) -> Option<VendorReading> {
+    if !hyperx_cloud3_collection_ok(info) {
+        return None;
+    }
+    let (level, charging) = hid::with_handle(&info.path, true, |handle| {
+        hyperx_cloud3_query(&mut HandleTransport(handle), Duration::from_millis(240))
+    })?;
+    Some(reading(
+        level,
+        charging,
+        "HyperX Cloud III 0x66",
+        Confidence::Community,
+        Some("HyperX Cloud III Wireless".to_owned()),
+        Some(DeviceKind::Headset),
+        format!("hyperx-cloud3:{:04X}", info.product_id),
+        "62B · 0x82/0x8A/0x89".to_owned(),
+    ))
+}
+
+fn mchose_g87_collection_ok(info: &hid::HidInterface) -> bool {
+    info.vendor_id == 0x3837
+        && info.product_id == 0x3033
+        && info.output_len >= 65
+        && info.input_len >= 65
+}
+
+fn mchose_g87_performance_request() -> [u8; 65] {
+    let mut request = [0u8; 65];
+    // Unnumbered report: Windows report ID 0 followed by the 64-byte body.
+    request[1..6].copy_from_slice(&[0x55, 0x05, 0x00, 0x38, 0x38]);
+    request
+}
+
+fn mchose_g87_wireless_request() -> [u8; 65] {
+    let mut request = [0u8; 65];
+    request[1..4].copy_from_slice(&[0x13, 0x4A, 0x01]);
+    let checksum = request[1..20]
+        .iter()
+        .fold(0u8, |sum, byte| sum.wrapping_add(*byte));
+    request[20] = checksum;
+    request
+}
+
+fn mchose_g87_wired_request() -> [u8; 65] {
+    let mut request = [0u8; 65];
+    request[1] = 0x09;
+    request[2] = 0x87;
+    request[5] = 0x01;
+    request[7] = 0x02;
+    request
+}
+
+fn parse_mchose_g87_performance(reply: &[u8]) -> Option<(u8, bool)> {
+    let offset = if reply.len() >= 42 && reply[0] == 0xAA && reply[1] == 0x05 {
+        0
+    } else if reply.len() >= 43 && reply[0] == 0 && reply[1] == 0xAA && reply[2] == 0x05 {
+        1
+    } else {
+        return None;
+    };
+    let level = reply[offset + 40];
+    (level <= 100).then_some((level, reply[offset + 41] != 0))
+}
+
+fn parse_mchose_g87_legacy(reply: &[u8]) -> Option<(u8, bool)> {
+    if reply.len() < 8 {
+        return None;
+    }
+    let offset =
+        if matches!(reply[0], 0x00 | 0x13 | 0x09) && matches!(reply.get(1), Some(0x4A | 0x87)) {
+            1
+        } else {
+            0
+        };
+    let command = *reply.get(offset)?;
+    let data = match command {
+        0x4A => offset + 4,
+        0x87 => offset + 10,
+        _ => return None,
+    };
+    let level = *reply.get(data)?;
+    let bits = *reply.get(data + 1)?;
+    if level > 100 {
+        return None;
+    }
+    let charging = bits >> 4 != 0;
+    let full = bits & 0x0F != 0;
+    Some((level, charging || (full && level < 100)))
+}
+
+fn mchose_g87_query(io: &mut impl VendorTransport) -> Option<(u8, bool, &'static str)> {
+    io.drain(65, 0, 8);
+    if io.write_output(&mchose_g87_performance_request()) {
+        for _ in 0..3 {
+            if let Some((level, charging)) = io
+                .read_input(65, 320)
+                .and_then(|reply| parse_mchose_g87_performance(&reply))
+            {
+                return Some((level, charging, "55 05 · rf_battery[40]"));
+            }
+        }
+    }
+    for (request, detail) in [
+        (mchose_g87_wireless_request(), "13 4A · level[command+4]"),
+        (mchose_g87_wired_request(), "09 87 · level[command+10]"),
+    ] {
+        io.drain(65, 0, 8);
+        if !io.write_output(&request) {
+            continue;
+        }
+        for _ in 0..2 {
+            if let Some((level, charging)) = io
+                .read_input(65, 320)
+                .and_then(|reply| parse_mchose_g87_legacy(&reply))
+            {
+                return Some((level, charging, detail));
+            }
+        }
+    }
+    None
+}
+
+fn read_mchose_g87(info: &hid::HidInterface) -> Option<VendorReading> {
+    if !mchose_g87_collection_ok(info) {
+        return None;
+    }
+    let (level, charging, detail) = hid::with_handle(&info.path, true, |handle| {
+        mchose_g87_query(&mut HandleTransport(handle))
+    })?;
+    Some(reading(
+        level,
+        Some(charging),
+        "MCHOSE G87 V2",
+        Confidence::Community,
+        Some("MCHOSE G87 V2".to_owned()),
+        Some(DeviceKind::Keyboard),
+        "mchose-g87:3033".to_owned(),
+        detail.to_owned(),
+    ))
+}
+
+fn angry_miao_name(vendor_id: u16, product_id: u16) -> Option<&'static str> {
+    match (vendor_id, product_id) {
+        (0x0E8D, 0x0703) => Some("Angry Miao AM Infinity .97 (2.4G)"),
+        (0x0E8D, 0x0880) | (0x35A1, 0x0035) => Some("Angry Miao AM Infinity .97 (USB)"),
+        _ => None,
+    }
+}
+
+fn angry_miao_request(product_id: u16) -> [u8; 62] {
+    let mut request = [0u8; 62];
+    request[..13].copy_from_slice(&[
+        0x14,
+        0x0A,
+        if product_id == 0x0703 { 0x80 } else { 0 },
+        b'R',
+        b'A',
+        b'C',
+        b'E',
+        0x05,
+        0x5A,
+        0x02,
+        0x00,
+        0xCF,
+        0x30,
+    ]);
+    request
+}
+
+fn parse_angry_miao(reply: &[u8]) -> Option<(u8, bool)> {
+    let offset = if reply.len() >= 62 && reply[0] == 0x14 && reply.get(3..7) == Some(b"RACE") {
+        0
+    } else if reply.len() >= 63
+        && reply[0] == 0
+        && reply[1] == 0x14
+        && reply.get(4..8) == Some(b"RACE")
+    {
+        1
+    } else {
+        return None;
+    };
+    for index in offset + 7..reply.len().saturating_sub(7) {
+        if reply[index] != 0x05 || !matches!(reply[index + 1], 0x5B | 0x5D) {
+            continue;
+        }
+        if u16::from_le_bytes([reply[index + 4], reply[index + 5]]) != 0x30CF {
+            continue;
+        }
+        let level = reply[index + 6];
+        if (1..=100).contains(&level) {
+            return Some((level, reply[index + 7] != 0));
+        }
+    }
+    None
+}
+
+fn angry_miao_query(io: &mut impl VendorTransport, product_id: u16) -> Option<(u8, bool)> {
+    let request = angry_miao_request(product_id);
+    if !io.set_feature(&request) {
+        let mut prefixed = [0u8; 63];
+        prefixed[1..].copy_from_slice(&request);
+        if !io.set_feature(&prefixed) {
+            return None;
+        }
+    }
+    for _ in 0..8 {
+        if let Some(reading) = io
+            .get_feature(0x14, 62)
+            .and_then(|reply| parse_angry_miao(&reply))
+        {
+            return Some(reading);
+        }
+    }
+    None
+}
+
+fn read_angry_miao(info: &hid::HidInterface) -> Option<VendorReading> {
+    let name = angry_miao_name(info.vendor_id, info.product_id)?;
+    if info.feature_len < 62 {
+        return None;
+    }
+    let (level, charging) = hid::with_handle(&info.path, true, |handle| {
+        angry_miao_query(&mut HandleTransport(handle), info.product_id)
+    })?;
+    Some(reading(
+        level,
+        Some(charging),
+        "Angry Miao RACE",
+        Confidence::Community,
+        Some(name.to_owned()),
+        Some(DeviceKind::Mouse),
+        format!("angry-miao:{:04X}:{:04X}", info.vendor_id, info.product_id),
+        "Feature 0x14 · command 0x30CF".to_owned(),
     ))
 }
 
@@ -1276,7 +1840,11 @@ enum MouseBatteryReport {
         raw: u8,
         level: u8,
     },
-    Scaled { device_id: u8, state: u8, raw: u8 },
+    Scaled {
+        device_id: u8,
+        state: u8,
+        raw: u8,
+    },
 }
 
 impl MouseBatteryReport {
@@ -1358,9 +1926,16 @@ fn parse_1d57_battery(report: &[u8]) -> Option<MouseBatteryReport> {
             raw,
             level: raw,
         }),
-        0x10 => (raw <= 10).then_some(MouseBatteryReport::Scaled { device_id, state, raw }),
-        0x85 => (0 < raw && raw <= 10)
-            .then_some(MouseBatteryReport::Scaled { device_id, state, raw }),
+        0x10 => (raw <= 10).then_some(MouseBatteryReport::Scaled {
+            device_id,
+            state,
+            raw,
+        }),
+        0x85 => (0 < raw && raw <= 10).then_some(MouseBatteryReport::Scaled {
+            device_id,
+            state,
+            raw,
+        }),
         0x24 => match state {
             0x01 => parse_m618air_level(raw).map(|level| MouseBatteryReport::Direct {
                 device_id,
@@ -1406,17 +1981,606 @@ fn read_1d57_mouse(info: &hid::HidInterface) -> Option<VendorReading> {
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FlydigiInfo {
+    level: u8,
+    charging: bool,
+    device_type: u8,
+    connection_mode: u8,
+}
+
+fn flydigi_collection_ok(
+    product_id: u16,
+    usage_page: u16,
+    output_len: u16,
+    input_len: u16,
+) -> bool {
+    matches!(product_id, 0x2502 | 0x2401)
+        && usage_page == 0xFFA0
+        && output_len >= 33
+        && input_len >= 33
+}
+
+fn flydigi_info_request(output_len: usize) -> Vec<u8> {
+    let mut request = vec![0u8; output_len.max(33)];
+    request[1..5].copy_from_slice(&[0x5A, 0xA5, 0x01, 0x02]);
+    request[32] = request[3..32]
+        .iter()
+        .fold(0u8, |sum, value| sum.wrapping_add(*value));
+    request
+}
+
+fn parse_flydigi_info(report: &[u8]) -> Option<FlydigiInfo> {
+    let offset = if report.starts_with(&[0x5A, 0xA5]) {
+        0
+    } else if report.starts_with(&[0x00, 0x5A, 0xA5]) {
+        1
+    } else {
+        return None;
+    };
+    if report.len() < offset + 12 || report[offset + 2] != 0x01 {
+        return None;
+    }
+    let payload = offset + 5;
+    let battery = report[payload + 6];
+    let raw = battery & 0x0F;
+    let level = match raw {
+        0..=5 => raw * 20,
+        6..=10 => raw * 10,
+        _ => raw,
+    };
+    Some(FlydigiInfo {
+        level,
+        charging: battery >> 4 != 0,
+        device_type: report[payload],
+        connection_mode: report[payload + 1],
+    })
+}
+
+fn flydigi_query(
+    io: &mut impl VendorTransport,
+    output_len: usize,
+    input_len: usize,
+) -> Option<FlydigiInfo> {
+    io.drain(input_len, 5, 6);
+    if !io.write_output(&flydigi_info_request(output_len)) {
+        return None;
+    }
+    for _ in 0..4 {
+        if let Some(info) = io
+            .read_input(input_len, 450)
+            .and_then(|reply| parse_flydigi_info(&reply))
+        {
+            return Some(info);
+        }
+    }
+    None
+}
+
+fn flydigi_name(product_id: u16, device_type: u8) -> String {
+    match device_type {
+        149 => "Flydigi APEX 6".to_owned(),
+        150 | 151 => "Flydigi APEX 6 Pro".to_owned(),
+        152 => "Flydigi APEX 6 Pro 幻刃".to_owned(),
+        _ if product_id == 0x2401 => "Flydigi Vader 5 Pro".to_owned(),
+        _ => "Flydigi APEX 6".to_owned(),
+    }
+}
+
+fn read_flydigi(info: &hid::HidInterface) -> Option<VendorReading> {
+    if !flydigi_collection_ok(
+        info.product_id,
+        info.usage_page,
+        info.output_len,
+        info.input_len,
+    ) {
+        return None;
+    }
+    let parsed = hid::with_handle(&info.path, true, |handle| {
+        flydigi_query(
+            &mut HandleTransport(handle),
+            info.output_len as usize,
+            info.input_len as usize,
+        )
+    })?;
+    let connection = match parsed.connection_mode {
+        1 => "有线 USB",
+        2 => "2.4G 无线",
+        3 => "蓝牙",
+        _ => "连接模式未知",
+    };
+    Some(reading(
+        parsed.level,
+        Some(parsed.charging),
+        "Flydigi GPA6",
+        Confidence::Community,
+        Some(flydigi_name(info.product_id, parsed.device_type)),
+        Some(DeviceKind::Controller),
+        format!("flydigi:{:04X}", info.product_id),
+        format!("GPA6 0x01 · device {} · {connection}", parsed.device_type),
+    ))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SonyInzonePart {
+    level: u8,
+    charging: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SonyInzoneState {
+    left: Option<SonyInzonePart>,
+    right: Option<SonyInzonePart>,
+    case: Option<SonyInzonePart>,
+}
+
+fn sony_inzone_collection_ok(
+    product_id: u16,
+    usage_page: u16,
+    usage: u16,
+    output_len: u16,
+    input_len: u16,
+) -> bool {
+    product_id == 0x0EC2
+        && usage_page == 0xFF04
+        && usage == 0x0001
+        && output_len == 64
+        && input_len == 64
+}
+
+fn sony_inzone_request(sequence: u16) -> [u8; 64] {
+    let mut request = [0u8; 64];
+    request[..11].copy_from_slice(&[
+        0x02, 0x0C, 0x01, 0x00, 0xFC, 0x08, 0x96, 0xC3, 0x41, 0x04, 0x01,
+    ]);
+    request[11..13].copy_from_slice(&sequence.to_le_bytes());
+    request[13] = request[6..13]
+        .iter()
+        .fold(0u8, |sum, value| sum.wrapping_add(*value));
+    request
+}
+
+fn parse_sony_inzone_part(status: u8, level: u8) -> Option<SonyInzonePart> {
+    (level <= 100).then_some(SonyInzonePart {
+        level,
+        charging: match status {
+            0 => Some(false),
+            1 => Some(true),
+            _ => None,
+        },
+    })
+}
+
+fn parse_sony_inzone_response(report: &[u8]) -> Option<SonyInzoneState> {
+    if report.len() < 20 || report[0] != 0x02 || report[6..9] != [0x96, 0xC3, 0x14] {
+        return None;
+    }
+    let checksum = report[6..19]
+        .iter()
+        .fold(0u8, |sum, value| sum.wrapping_add(*value));
+    if report[19] != checksum {
+        return None;
+    }
+    Some(SonyInzoneState {
+        left: parse_sony_inzone_part(report[13], report[14]),
+        right: parse_sony_inzone_part(report[15], report[16]),
+        case: parse_sony_inzone_part(report[17], report[18]),
+    })
+}
+
+fn sony_inzone_query(io: &mut impl VendorTransport, sequence: u16) -> Option<SonyInzoneState> {
+    io.drain(64, 5, 3);
+    if !io.write_output(&sony_inzone_request(sequence)) {
+        return None;
+    }
+    for _ in 0..4 {
+        if let Some(state) = io
+            .read_input(64, 250)
+            .and_then(|reply| parse_sony_inzone_response(&reply))
+        {
+            return Some(state);
+        }
+    }
+    None
+}
+
+fn read_sony_inzone(info: &hid::HidInterface) -> Vec<VendorReading> {
+    if !sony_inzone_collection_ok(
+        info.product_id,
+        info.usage_page,
+        info.usage,
+        info.output_len,
+        info.input_len,
+    ) {
+        return Vec::new();
+    }
+    static SEQUENCE: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(1);
+    let mut sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if sequence == 0 {
+        sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    let Some(state) = hid::with_handle(&info.path, true, |handle| {
+        sony_inzone_query(&mut HandleTransport(handle), sequence)
+    }) else {
+        return Vec::new();
+    };
+    [
+        ("left", "左耳", state.left),
+        ("right", "右耳", state.right),
+        ("case", "充电盒", state.case),
+    ]
+    .into_iter()
+    .filter_map(|(suffix, label, part)| {
+        part.map(|part| {
+            reading(
+                part.level,
+                part.charging,
+                "Sony INZONE HID",
+                Confidence::Community,
+                Some(format!("Sony INZONE Buds {label}")),
+                Some(DeviceKind::Earbuds),
+                format!("sony-inzone:0EC2:{suffix}"),
+                format!("WF-G700N · {label} · report 0x02 · seq {sequence:04X}"),
+            )
+        })
+    })
+    .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NuphyInfo {
+    level: u8,
+    mode: u8,
+}
+
+fn nuphy_collection_ok(product_id: u16, input_len: u16, output_len: u16) -> bool {
+    matches!(
+        product_id,
+        0xA011 | 0x8F01 | 0x8F02 | 0x8F03 | 0x8F04 | 0x8F05 | 0x8F06 | 0x8F07
+    ) && input_len == 65
+        && output_len == 65
+}
+
+fn nuphy_request(command: u8, offset: u16, length: u8) -> [u8; 65] {
+    let mut request = [0u8; 65];
+    request[1] = 0x55;
+    request[2] = command;
+    request[5] = length;
+    request[6..8].copy_from_slice(&offset.to_le_bytes());
+    request[4] = request[5..]
+        .iter()
+        .fold(0u8, |sum, value| sum.wrapping_add(*value));
+    request
+}
+
+fn parse_nuphy_response(reply: &[u8], command: u8) -> Option<&[u8]> {
+    (reply.len() >= 10 && matches!(reply[1], 0xAA | 0x55) && reply[2] == command).then_some(reply)
+}
+
+fn nuphy_ask(
+    io: &mut impl VendorTransport,
+    command: u8,
+    offset: u16,
+    length: u8,
+) -> Option<Vec<u8>> {
+    if !io.write_output(&nuphy_request(command, offset, length)) {
+        return None;
+    }
+    for _ in 0..3 {
+        if let Some(reply) = io
+            .read_input(65, 300)
+            .filter(|reply| parse_nuphy_response(reply, command).is_some())
+        {
+            return Some(reply);
+        }
+    }
+    None
+}
+
+fn nuphy_query(io: &mut impl VendorTransport) -> Option<NuphyInfo> {
+    io.drain(65, 5, 3);
+    let mode = nuphy_ask(io, 0x04, 0, 16)
+        .and_then(|reply| (reply[9] <= 3).then_some(reply[9]))
+        .unwrap_or(1);
+    let reply = nuphy_ask(io, 0x05, u16::from(mode) * 64 + 32, 1)?;
+    let level = reply[9] & 0x7F;
+    (level <= 100).then_some(NuphyInfo { level, mode })
+}
+
+fn nuphy_name(product_id: u16, product: &str) -> String {
+    let cleaned = product.replace("Dongle", "");
+    let cleaned = cleaned.trim();
+    if !cleaned.is_empty() {
+        return cleaned.to_owned();
+    }
+    match product_id {
+        0xA011 | 0x8F01 => "NuPhy WH80".to_owned(),
+        0x8F02 => "NuPhy Air75 V2".to_owned(),
+        0x8F03 => "NuPhy Air96 V2".to_owned(),
+        0x8F04 => "NuPhy Air60 V2".to_owned(),
+        0x8F05 => "NuPhy Halo75 V2".to_owned(),
+        0x8F06 => "NuPhy Halo96 V2".to_owned(),
+        0x8F07 => "NuPhy Field75".to_owned(),
+        _ => "NuPhy 无线键盘".to_owned(),
+    }
+}
+
+fn read_nuphy(info: &hid::HidInterface) -> Option<VendorReading> {
+    if !nuphy_collection_ok(info.product_id, info.input_len, info.output_len) {
+        return None;
+    }
+    let parsed = hid::with_handle(&info.path, true, |handle| {
+        nuphy_query(&mut HandleTransport(handle))
+    })?;
+    Some(reading(
+        parsed.level,
+        None,
+        "NuPhy HID",
+        Confidence::Community,
+        Some(nuphy_name(info.product_id, &info.product)),
+        Some(DeviceKind::Keyboard),
+        format!("nuphy:{:04X}", info.product_id),
+        format!(
+            "0x04/0x05 · mode {} · offset {:04X}",
+            parsed.mode,
+            u16::from(parsed.mode) * 64 + 32
+        ),
+    ))
+}
+
+fn parse_rapoo_telemetry(report: &[u8]) -> Option<(u8, Option<bool>)> {
+    if report.len() < 18 || report[0] != 0x07 || !(1..=100).contains(&report[8]) {
+        return None;
+    }
+    let charging = match report[7] {
+        0 => Some(false),
+        2 => Some(true),
+        _ => None,
+    };
+    Some((report[8], charging))
+}
+
+fn read_rapoo(info: &hid::HidInterface) -> Option<VendorReading> {
+    if info.usage_page < 0xFF00 || info.input_len != 19 {
+        return None;
+    }
+    let (level, charging) = hid::listen(&info.path, 19, 1200, parse_rapoo_telemetry)?;
+    let name = if info.product.trim().is_empty() {
+        format!("Rapoo 无线鼠标 ({:04X})", info.product_id)
+    } else {
+        info.product.clone()
+    };
+    Some(reading(
+        level,
+        charging,
+        "Rapoo 0x07 遥测",
+        Confidence::Community,
+        Some(name),
+        Some(DeviceKind::Mouse),
+        format!("rapoo:{:04X}", info.product_id),
+        "report 0x07 · level[8] · charge[7]".to_owned(),
+    ))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ValkyrieState {
+    keyboard: Option<u8>,
+    mouse: Option<u8>,
+    device_type: u8,
+}
+
+fn valkyrie_collection_ok(vendor_id: u16, feature_len: u16) -> bool {
+    matches!(vendor_id, 0x374A | 0x3151 | 0x347A) && matches!(feature_len, 64 | 65)
+}
+
+fn valkyrie_request(feature_len: usize) -> Vec<u8> {
+    let mut request = vec![0u8; feature_len];
+    if feature_len == 65 {
+        request[1] = 0xF7;
+    } else {
+        request[0] = 0xF7;
+    }
+    request
+}
+
+fn parse_valkyrie_response(reply: &[u8]) -> Option<ValkyrieState> {
+    let offset = if reply.starts_with(&[0x00, 0x01]) {
+        1
+    } else if reply.first() == Some(&0x01) {
+        0
+    } else {
+        return None;
+    };
+    if reply.len() < offset + 7 {
+        return None;
+    }
+    let keyboard = reply[offset + 1];
+    let mouse = reply[offset + 2];
+    let device_type = reply[offset + 6];
+    Some(ValkyrieState {
+        keyboard: (1..=100).contains(&keyboard).then_some(keyboard),
+        mouse: (1..=100).contains(&mouse).then_some(mouse),
+        device_type,
+    })
+}
+
+fn valkyrie_query(io: &mut impl VendorTransport, feature_len: usize) -> Option<ValkyrieState> {
+    let request = valkyrie_request(feature_len);
+    if !io.set_feature(&request) {
+        return None;
+    }
+    std::thread::sleep(Duration::from_millis(10));
+    io.get_feature(request[0], feature_len)
+        .and_then(|reply| parse_valkyrie_response(&reply))
+}
+
+fn valkyrie_name(product_id: u16, product: &str, kind: DeviceKind) -> String {
+    let cleaned = product.replace("Dongle", "").replace("Receiver", "");
+    let cleaned = cleaned.trim();
+    if !cleaned.is_empty() && !cleaned.to_ascii_lowercase().starts_with("hid") {
+        return cleaned.to_owned();
+    }
+    let keyboard = match product_id {
+        0xA280 => Some("VK 99 Max V2"),
+        0xA277 => Some("VK 99 V2"),
+        0xA260 => Some("VK 99 MAX"),
+        0xA262 => Some("VK99 Ultra"),
+        0xA219 => Some("VK99 Gaming"),
+        0xA270 => Some("VK 87 Max V2"),
+        0xA267 => Some("VK 87 V2"),
+        0xA274 => Some("VK MAG87 Max"),
+        0xA250 => Some("VK 75 PRO"),
+        0xA283 => Some("VK 75"),
+        0xA293 => Some("VK 108"),
+        0xA286 => Some("VK NB 80 Pro"),
+        0xA216 => Some("VK MAG75 Pro"),
+        0xA213 => Some("VK MAG75 Lite"),
+        0xA225 | 0xA232 => Some("VK MAG68"),
+        0xA233 => Some("VK MAG 68 Max"),
+        0xA264 => Some("VK Cyber 68"),
+        0xA242 => Some("Mecha 75"),
+        0xA228 => Some("NB68"),
+        0xA236 => Some("NB68 Max"),
+        _ => None,
+    };
+    let mouse = match product_id {
+        0xA321 => Some("VK M5"),
+        0xA318 => Some("VK M5 Lite"),
+        0xA328 | 0xA329 => Some("VK M5 PRO"),
+        0xA333 => Some("VK M5 EVO"),
+        0xA336 => Some("VK M5 Super"),
+        0xA351 | 0xA352 => Some("VK M5 Ultra"),
+        0xA339 | 0xA340 => Some("VK M5 MAX"),
+        0xA354 | 0xA355 => Some("VK M7 PRO"),
+        0xA345 => Some("VK M4"),
+        0xA342 => Some("VK M4 Lite"),
+        0x0331 => Some("VK M3 Basic"),
+        _ => None,
+    };
+    match kind {
+        DeviceKind::Keyboard => keyboard.unwrap_or("Valkyrie 无线键盘").to_owned(),
+        DeviceKind::Mouse => mouse.unwrap_or("Valkyrie 无线鼠标").to_owned(),
+        _ => "Valkyrie 外设".to_owned(),
+    }
+}
+
+fn read_valkyrie(info: &hid::HidInterface) -> Vec<VendorReading> {
+    if !valkyrie_collection_ok(info.vendor_id, info.feature_len) {
+        return Vec::new();
+    }
+    let Some(state) = hid::with_sync_handle(&info.path, |handle| {
+        valkyrie_query(&mut HandleTransport(handle), info.feature_len as usize)
+    }) else {
+        return Vec::new();
+    };
+    let mut readings = Vec::new();
+    if matches!(state.device_type, 1 | 3) || (state.device_type == 0 && state.keyboard.is_some()) {
+        if let Some(level) = state.keyboard {
+            readings.push(reading(
+                level,
+                None,
+                "Valkyrie 0xF7",
+                Confidence::Community,
+                Some(valkyrie_name(
+                    info.product_id,
+                    &info.product,
+                    DeviceKind::Keyboard,
+                )),
+                Some(DeviceKind::Keyboard),
+                format!("valkyrie:{:04X}:{:04X}:kb", info.vendor_id, info.product_id),
+                format!("0xF7 · type {} · 键盘", state.device_type),
+            ));
+        }
+    }
+    if matches!(state.device_type, 2 | 3) {
+        if let Some(level) = state.mouse {
+            readings.push(reading(
+                level,
+                None,
+                "Valkyrie 0xF7",
+                Confidence::Community,
+                Some(valkyrie_name(
+                    info.product_id,
+                    &info.product,
+                    DeviceKind::Mouse,
+                )),
+                Some(DeviceKind::Mouse),
+                format!("valkyrie:{:04X}:{:04X}:ms", info.vendor_id, info.product_id),
+                format!("0xF7 · type {} · 鼠标", state.device_type),
+            ));
+        }
+    }
+    readings
+}
+
+fn apple_magic_collection_ok(vendor_id: u16, product: &str, feature_len: u16) -> bool {
+    matches!(vendor_id, 0x05AC | 0x004C)
+        && product.to_ascii_lowercase().contains("magic")
+        && feature_len >= 2
+}
+
+fn apple_magic_query(io: &mut impl VendorTransport, feature_len: usize) -> Option<(u8, u8)> {
+    for report_id in [0x47, 0xD1] {
+        if let Some(level) = io
+            .get_feature(report_id, feature_len)
+            .and_then(|reply| reply.get(1).copied())
+            .filter(|level| (1..=100).contains(level))
+        {
+            return Some((level, report_id));
+        }
+    }
+    None
+}
+
+fn read_apple_magic(info: &hid::HidInterface) -> Option<VendorReading> {
+    if !apple_magic_collection_ok(info.vendor_id, &info.product, info.feature_len) {
+        return None;
+    }
+    let (level, report_id) = hid::with_sync_handle(&info.path, |handle| {
+        apple_magic_query(&mut HandleTransport(handle), info.feature_len as usize)
+    })?;
+    let lower = info.product.to_ascii_lowercase();
+    let kind = if lower.contains("keyboard") {
+        DeviceKind::Keyboard
+    } else {
+        DeviceKind::Mouse
+    };
+    Some(reading(
+        level,
+        None,
+        "Apple Magic HID",
+        Confidence::Community,
+        Some(info.product.clone()),
+        Some(kind),
+        format!("apple-magic:{:04X}", info.product_id),
+        format!("Feature 0x{report_id:02X} · level[1]"),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        CorsairTimings, MouseBatteryReport, RAZER_PA_BARRACUDA, RAZER_PA_BLACKSHARK,
-        corsair_query, corsair_request, eightbitdo_confidence,
-        eightbitdo_name, keychron_collection_ok, keychron_query, parse_1d57_battery,
-        parse_corsair_dark_core_level, parse_corsair_virtuoso_charging,
-        parse_corsair_virtuoso_level, parse_dual_shock4_battery, parse_dualsense_battery,
-        parse_eightbitdo_battery, parse_keychron_battery, parse_razer_pa_charging,
-        parse_razer_pa_level, parse_steam_battery, parse_steelseries_b0,
-        playstation_battery_report, razer_pa_query, razer_pa_read_at, razer_pa_remote,
+        CorsairTimings, FlydigiInfo, MouseBatteryReport, RAZER_PA_BARRACUDA, RAZER_PA_BLACKSHARK,
+        SonyInzonePart, SonyInzoneState, corsair_query, corsair_request, eightbitdo_confidence,
+        eightbitdo_name, flydigi_collection_ok, flydigi_info_request, flydigi_query,
+        keychron_collection_ok, keychron_query, parse_1d57_battery, parse_corsair_dark_core_level,
+        parse_corsair_virtuoso_charging, parse_corsair_virtuoso_level, parse_dual_shock4_battery,
+        parse_dualsense_battery, parse_eightbitdo_battery, parse_flydigi_info,
+        parse_keychron_battery, parse_razer_pa_charging, parse_razer_pa_level,
+        parse_sony_inzone_response, parse_steam_battery, parse_steelseries_b0,
+        playstation_battery_report, razer_pa_collection_ok, razer_pa_query, razer_pa_read_at,
+        razer_pa_remote, razer_x_ack, razer_x_control, razer_x_control_request, razer_x_data,
+        sony_inzone_collection_ok, sony_inzone_query, sony_inzone_request, steam_connection_state,
+        steam_disable_lizard_request,
+    };
+    use super::{
+        HyperXCloud3State, NuphyInfo, ValkyrieState, angry_miao_query, angry_miao_request,
+        apple_magic_collection_ok, apple_magic_query, hyperx_cloud3_query, hyperx_cloud3_request,
+        mchose_g87_performance_request, mchose_g87_query, mchose_g87_wired_request,
+        mchose_g87_wireless_request, nuphy_collection_ok, nuphy_query, nuphy_request,
+        parse_angry_miao, parse_hyperx_cloud3, parse_mchose_g87_legacy,
+        parse_mchose_g87_performance, parse_nuphy_response, parse_rapoo_telemetry,
+        parse_valkyrie_response, valkyrie_collection_ok, valkyrie_query, valkyrie_request,
     };
     use anybattery_core::Confidence;
     use std::collections::VecDeque;
@@ -1431,6 +2595,7 @@ mod tests {
         replies: VecDeque<Vec<u8>>,
         stale: VecDeque<Vec<u8>>,
         read_calls: Vec<(usize, u32)>,
+        get_calls: Vec<(u8, usize)>,
         respond_after: usize,
         started: bool,
     }
@@ -1443,6 +2608,7 @@ mod tests {
                 replies: replies.into(),
                 stale: VecDeque::new(),
                 read_calls: Vec::new(),
+                get_calls: Vec::new(),
                 respond_after: 0,
                 started: false,
             }
@@ -1472,6 +2638,162 @@ mod tests {
             self.features.push(report.to_vec());
             true
         }
+
+        fn get_feature(&mut self, report_id: u8, length: usize) -> Option<Vec<u8>> {
+            self.get_calls.push((report_id, length));
+            self.replies.pop_front()
+        }
+    }
+
+    fn hyperx_cloud3_reply(command: u8, state: u8, state2: u8, level: u8) -> Vec<u8> {
+        let mut reply = vec![0u8; 62];
+        reply[..5].copy_from_slice(&[0x66, command, state, state2, level]);
+        reply
+    }
+
+    fn angry_miao_reply(prefixed: bool, level: u8, charging: u8) -> Vec<u8> {
+        let mut reply = vec![0u8; if prefixed { 63 } else { 62 }];
+        let offset = usize::from(prefixed);
+        reply[offset] = 0x14;
+        reply[offset + 3..offset + 7].copy_from_slice(b"RACE");
+        reply[offset + 7..offset + 15]
+            .copy_from_slice(&[0x05, 0x5B, 0x02, 0x00, 0xCF, 0x30, level, charging]);
+        reply
+    }
+
+    #[test]
+    fn hyperx_cloud3_parser_validates_header_status_and_full_state() {
+        let mut state = HyperXCloud3State::default();
+        assert!(parse_hyperx_cloud3(
+            &hyperx_cloud3_reply(0x0D, 1, 0, 76),
+            &mut state
+        ));
+        assert_eq!(state.level, Some(76));
+        assert!(parse_hyperx_cloud3(
+            &hyperx_cloud3_reply(0x8A, 1, 0, 0),
+            &mut state
+        ));
+        assert_eq!(state.charging, Some(true));
+        assert!(parse_hyperx_cloud3(
+            &hyperx_cloud3_reply(0x0C, 2, 0, 0),
+            &mut state
+        ));
+        assert_eq!(state.level, Some(100));
+        assert_eq!(state.charging, Some(false));
+
+        let mut offline = HyperXCloud3State::default();
+        assert!(parse_hyperx_cloud3(
+            &hyperx_cloud3_reply(0x89, 0, 0, 88),
+            &mut offline
+        ));
+        assert_eq!(offline.level, None);
+        assert!(!parse_hyperx_cloud3(
+            &hyperx_cloud3_reply(0x89, 1, 0, 101),
+            &mut offline
+        ));
+        let mut wrong_header = hyperx_cloud3_reply(0x89, 1, 0, 80);
+        wrong_header[0] = 0x65;
+        assert!(!parse_hyperx_cloud3(&wrong_header, &mut offline));
+    }
+
+    #[test]
+    fn hyperx_cloud3_session_sends_all_queries_on_one_transport() {
+        let mut io = ScriptedTransport::new(vec![
+            hyperx_cloud3_reply(0x82, 1, 0, 0),
+            hyperx_cloud3_reply(0x8A, 0, 0, 0),
+            hyperx_cloud3_reply(0x0D, 1, 0, 68),
+        ]);
+        assert_eq!(
+            hyperx_cloud3_query(&mut io, Duration::from_millis(10)),
+            Some((68, Some(false)))
+        );
+        let commands: Vec<u8> = io.writes.iter().map(|write| write[1]).collect();
+        assert_eq!(commands, vec![0x82, 0x8A, 0x89]);
+        assert!(io.writes.iter().all(|write| write.len() == 62));
+        assert_eq!(hyperx_cloud3_request(0x89)[0], 0x66);
+    }
+
+    #[test]
+    fn mchose_g87_frames_and_parsers_cover_new_and_legacy_firmware() {
+        let performance = mchose_g87_performance_request();
+        assert_eq!(&performance[..6], &[0, 0x55, 0x05, 0, 0x38, 0x38]);
+        let wireless = mchose_g87_wireless_request();
+        assert_eq!(&wireless[..4], &[0, 0x13, 0x4A, 0x01]);
+        assert_eq!(wireless[20], 0x5E);
+        let wired = mchose_g87_wired_request();
+        assert_eq!((wired[1], wired[2], wired[5], wired[7]), (0x09, 0x87, 1, 2));
+
+        let mut bare = vec![0u8; 64];
+        bare[..2].copy_from_slice(&[0xAA, 0x05]);
+        bare[40] = 81;
+        bare[41] = 1;
+        assert_eq!(parse_mchose_g87_performance(&bare), Some((81, true)));
+        let mut prefixed = vec![0u8; 65];
+        prefixed[1..3].copy_from_slice(&[0xAA, 0x05]);
+        prefixed[41] = 72;
+        assert_eq!(parse_mchose_g87_performance(&prefixed), Some((72, false)));
+
+        let mut wireless_reply = vec![0u8; 65];
+        wireless_reply[0] = 0x4A;
+        wireless_reply[4] = 63;
+        wireless_reply[5] = 0x10;
+        assert_eq!(parse_mchose_g87_legacy(&wireless_reply), Some((63, true)));
+        let mut wired_reply = vec![0u8; 65];
+        wired_reply[1] = 0x87;
+        wired_reply[11] = 54;
+        wired_reply[12] = 0x01;
+        assert_eq!(parse_mchose_g87_legacy(&wired_reply), Some((54, true)));
+        wired_reply[11] = 101;
+        assert_eq!(parse_mchose_g87_legacy(&wired_reply), None);
+    }
+
+    #[test]
+    fn mchose_g87_session_falls_back_to_wireless_after_performance_failure() {
+        let mut legacy = vec![0u8; 65];
+        legacy[0] = 0x4A;
+        legacy[4] = 67;
+        let mut io = ScriptedTransport::new(vec![legacy]);
+        io.respond_after = 2;
+        assert_eq!(
+            mchose_g87_query(&mut io),
+            Some((67, false, "13 4A · level[command+4]"))
+        );
+        assert_eq!(io.writes.len(), 2);
+        assert_eq!(io.writes[0], mchose_g87_performance_request());
+        assert_eq!(io.writes[1], mchose_g87_wireless_request());
+    }
+
+    #[test]
+    fn angry_miao_request_and_parser_validate_race_battery_command() {
+        let wireless = angry_miao_request(0x0703);
+        assert_eq!(wireless.len(), 62);
+        assert_eq!(
+            &wireless[..13],
+            &[
+                0x14, 0x0A, 0x80, b'R', b'A', b'C', b'E', 0x05, 0x5A, 0x02, 0x00, 0xCF, 0x30,
+            ]
+        );
+        assert_eq!(angry_miao_request(0x0880)[2], 0);
+        assert_eq!(
+            parse_angry_miao(&angry_miao_reply(false, 79, 1)),
+            Some((79, true))
+        );
+        assert_eq!(
+            parse_angry_miao(&angry_miao_reply(true, 58, 0)),
+            Some((58, false))
+        );
+        let mut wrong_command = angry_miao_reply(false, 79, 1);
+        wrong_command[11] = 0xCE;
+        assert_eq!(parse_angry_miao(&wrong_command), None);
+        assert_eq!(parse_angry_miao(&angry_miao_reply(false, 0, 0)), None);
+    }
+
+    #[test]
+    fn angry_miao_session_sets_feature_then_polls_until_valid_reply() {
+        let mut io = ScriptedTransport::new(vec![vec![0u8; 62], angry_miao_reply(false, 84, 1)]);
+        assert_eq!(angry_miao_query(&mut io, 0x0703), Some((84, true)));
+        assert_eq!(io.features, vec![angry_miao_request(0x0703).to_vec()]);
+        assert_eq!(io.get_calls, vec![(0x14, 62), (0x14, 62)]);
     }
 
     fn fast_timings() -> CorsairTimings {
@@ -1489,14 +2811,7 @@ mod tests {
         if product_id == 0x1B7F {
             reply[1..6].copy_from_slice(&[0x01, 0x02, 0x00, raw as u8, (raw >> 8) as u8]);
         } else {
-            reply[1..7].copy_from_slice(&[
-                0x01,
-                0x01,
-                0x02,
-                0x00,
-                raw as u8,
-                (raw >> 8) as u8,
-            ]);
+            reply[1..7].copy_from_slice(&[0x01, 0x01, 0x02, 0x00, raw as u8, (raw >> 8) as u8]);
         }
         reply
     }
@@ -1513,6 +2828,329 @@ mod tests {
         reply[1] = 0x06;
         reply[20] = level;
         reply
+    }
+
+    fn nuphy_reply(command: u8, value: u8) -> Vec<u8> {
+        let mut reply = vec![0u8; 65];
+        reply[1] = 0xAA;
+        reply[2] = command;
+        reply[9] = value;
+        reply
+    }
+
+    fn valkyrie_reply(keyboard: u8, mouse: u8, device_type: u8) -> Vec<u8> {
+        let mut reply = vec![0u8; 65];
+        reply[1] = 0x01;
+        reply[2] = keyboard;
+        reply[3] = mouse;
+        reply[7] = device_type;
+        reply
+    }
+
+    #[test]
+    fn nuphy_candidate_is_limited_to_known_models_and_65_byte_channels() {
+        for pid in [
+            0xA011, 0x8F01, 0x8F02, 0x8F03, 0x8F04, 0x8F05, 0x8F06, 0x8F07,
+        ] {
+            assert!(nuphy_collection_ok(pid, 65, 65));
+        }
+        assert!(!nuphy_collection_ok(0x8F08, 65, 65));
+        assert!(!nuphy_collection_ok(0x8F01, 64, 65));
+        assert!(!nuphy_collection_ok(0x8F01, 65, 64));
+    }
+
+    #[test]
+    fn nuphy_request_selects_mode_battery_offset_and_checksum() {
+        let mode = nuphy_request(0x04, 0, 16);
+        assert_eq!(
+            &mode[..9],
+            &[0x00, 0x55, 0x04, 0x00, 0x10, 0x10, 0x00, 0x00, 0x00]
+        );
+        let battery = nuphy_request(0x05, 2 * 64 + 32, 1);
+        assert_eq!(
+            &battery[..9],
+            &[0x00, 0x55, 0x05, 0x00, 0xA1, 0x01, 0xA0, 0x00, 0x00]
+        );
+    }
+
+    #[test]
+    fn nuphy_session_uses_mode_then_battery_on_one_transport() {
+        let mut io = ScriptedTransport::new(vec![
+            nuphy_reply(0x04, 2),
+            vec![0u8; 65],
+            nuphy_reply(0x05, 85),
+        ]);
+        assert_eq!(nuphy_query(&mut io), Some(NuphyInfo { level: 85, mode: 2 }));
+        assert_eq!(
+            io.writes,
+            vec![
+                nuphy_request(0x04, 0, 16).to_vec(),
+                nuphy_request(0x05, 160, 1).to_vec(),
+            ]
+        );
+        assert!(parse_nuphy_response(&nuphy_reply(0x05, 85), 0x04).is_none());
+        let mut bad_header = nuphy_reply(0x05, 85);
+        bad_header[1] = 0x00;
+        assert!(parse_nuphy_response(&bad_header, 0x05).is_none());
+    }
+
+    #[test]
+    fn rapoo_telemetry_requires_real_level_and_decodes_charge_state() {
+        let mut report = vec![0u8; 19];
+        report[0] = 0x07;
+        report[8] = 73;
+        assert_eq!(parse_rapoo_telemetry(&report), Some((73, Some(false))));
+        report[7] = 2;
+        assert_eq!(parse_rapoo_telemetry(&report), Some((73, Some(true))));
+        report[7] = 1;
+        assert_eq!(parse_rapoo_telemetry(&report), Some((73, None)));
+        for level in [0, 101] {
+            report[8] = level;
+            assert_eq!(parse_rapoo_telemetry(&report), None);
+        }
+        report[8] = 73;
+        report[0] = 0x06;
+        assert_eq!(parse_rapoo_telemetry(&report), None);
+        assert_eq!(parse_rapoo_telemetry(&report[..17]), None);
+    }
+
+    #[test]
+    fn valkyrie_candidate_and_request_follow_caps_length() {
+        for vid in [0x374A, 0x3151, 0x347A] {
+            assert!(valkyrie_collection_ok(vid, 64));
+            assert!(valkyrie_collection_ok(vid, 65));
+        }
+        assert!(!valkyrie_collection_ok(0x1532, 65));
+        assert!(!valkyrie_collection_ok(0x374A, 63));
+        let framed = valkyrie_request(65);
+        assert_eq!(&framed[..3], &[0x00, 0xF7, 0x00]);
+        let direct = valkyrie_request(64);
+        assert_eq!(&direct[..3], &[0xF7, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn valkyrie_parser_handles_keyboard_mouse_and_dual_mode() {
+        assert_eq!(
+            parse_valkyrie_response(&valkyrie_reply(80, 75, 3)),
+            Some(ValkyrieState {
+                keyboard: Some(80),
+                mouse: Some(75),
+                device_type: 3,
+            })
+        );
+        let unnumbered = valkyrie_reply(60, 0, 1);
+        assert_eq!(
+            parse_valkyrie_response(&unnumbered[1..]),
+            Some(ValkyrieState {
+                keyboard: Some(60),
+                mouse: None,
+                device_type: 1,
+            })
+        );
+        assert_eq!(
+            parse_valkyrie_response(&valkyrie_reply(0, 101, 2))
+                .unwrap()
+                .mouse,
+            None
+        );
+        assert_eq!(parse_valkyrie_response(&vec![0u8; 65]), None);
+    }
+
+    #[test]
+    fn valkyrie_session_sets_then_gets_f7_on_the_same_transport() {
+        let mut io = ScriptedTransport::new(vec![valkyrie_reply(88, 66, 3)]);
+        let state = valkyrie_query(&mut io, 65).unwrap();
+        assert_eq!(state.keyboard, Some(88));
+        assert_eq!(state.mouse, Some(66));
+        assert_eq!(io.features, vec![valkyrie_request(65)]);
+        assert!(io.writes.is_empty());
+    }
+
+    #[test]
+    fn apple_magic_candidate_requires_apple_name_and_feature_channel() {
+        assert!(apple_magic_collection_ok(0x05AC, "Magic Mouse", 65));
+        assert!(apple_magic_collection_ok(0x004C, "Apple Magic Keyboard", 2));
+        assert!(!apple_magic_collection_ok(0x1532, "Magic Mouse", 65));
+        assert!(!apple_magic_collection_ok(0x05AC, "Apple Keyboard", 65));
+        assert!(!apple_magic_collection_ok(0x05AC, "Magic Trackpad", 1));
+    }
+
+    #[test]
+    fn apple_magic_session_falls_back_to_d1_and_rejects_invalid_levels() {
+        let mut invalid = vec![0u8; 65];
+        invalid[0] = 0x47;
+        invalid[1] = 101;
+        let mut valid = vec![0u8; 65];
+        valid[0] = 0xD1;
+        valid[1] = 82;
+        let mut io = ScriptedTransport::new(vec![invalid, valid]);
+        assert_eq!(apple_magic_query(&mut io, 65), Some((82, 0xD1)));
+        assert_eq!(io.get_calls, vec![(0x47, 65), (0xD1, 65)]);
+        assert!(io.features.is_empty());
+        assert!(io.writes.is_empty());
+
+        let mut zero = ScriptedTransport::new(vec![vec![0u8; 65], vec![0u8; 65]]);
+        assert_eq!(apple_magic_query(&mut zero, 65), None);
+    }
+
+    fn flydigi_reply(raw: u8, device_type: u8, connection_mode: u8) -> Vec<u8> {
+        let mut reply = vec![0u8; 33];
+        reply[1..5].copy_from_slice(&[0x5A, 0xA5, 0x01, 0x01]);
+        reply[6] = device_type;
+        reply[7] = connection_mode;
+        reply[12] = raw;
+        reply[32] = reply[3..32]
+            .iter()
+            .fold(0u8, |sum, value| sum.wrapping_add(*value));
+        reply
+    }
+
+    fn sony_inzone_reply(left: (u8, u8), right: (u8, u8), case: (u8, u8)) -> Vec<u8> {
+        let mut reply = vec![0u8; 64];
+        reply[0] = 0x02;
+        reply[6..9].copy_from_slice(&[0x96, 0xC3, 0x14]);
+        reply[13..19].copy_from_slice(&[left.0, left.1, right.0, right.1, case.0, case.1]);
+        reply[19] = reply[6..19]
+            .iter()
+            .fold(0u8, |sum, value| sum.wrapping_add(*value));
+        reply
+    }
+
+    #[test]
+    fn flydigi_candidate_requires_model_vendor_page_and_report_lengths() {
+        assert!(flydigi_collection_ok(0x2502, 0xFFA0, 33, 33));
+        assert!(flydigi_collection_ok(0x2401, 0xFFA0, 65, 65));
+        assert!(!flydigi_collection_ok(0x2503, 0xFFA0, 33, 33));
+        assert!(!flydigi_collection_ok(0x2502, 0xFF00, 33, 33));
+        assert!(!flydigi_collection_ok(0x2502, 0xFFA0, 32, 33));
+        assert!(!flydigi_collection_ok(0x2502, 0xFFA0, 33, 32));
+    }
+
+    #[test]
+    fn flydigi_request_has_unnumbered_id_and_checksum() {
+        let request = flydigi_info_request(40);
+        assert_eq!(request.len(), 40);
+        assert_eq!(&request[..5], &[0x00, 0x5A, 0xA5, 0x01, 0x02]);
+        assert_eq!(request[32], 0x03);
+        assert!(request[33..].iter().all(|value| *value == 0));
+    }
+
+    #[test]
+    fn flydigi_parser_scales_levels_and_accepts_both_report_layouts() {
+        for (raw, level) in [(0, 0), (5, 100), (6, 60), (10, 100), (11, 11), (15, 15)] {
+            let reply = flydigi_reply(raw, 149, 2);
+            assert_eq!(
+                parse_flydigi_info(&reply).map(|info| info.level),
+                Some(level)
+            );
+        }
+        let reply = flydigi_reply(0x87, 150, 1);
+        assert_eq!(
+            parse_flydigi_info(&reply),
+            Some(FlydigiInfo {
+                level: 70,
+                charging: true,
+                device_type: 150,
+                connection_mode: 1,
+            })
+        );
+        assert_eq!(
+            parse_flydigi_info(&reply[1..]).map(|info| info.level),
+            Some(70)
+        );
+        assert_eq!(parse_flydigi_info(&reply[..12]), None);
+        let mut wrong_command = reply.clone();
+        wrong_command[3] = 0x02;
+        assert_eq!(parse_flydigi_info(&wrong_command), None);
+        assert_eq!(parse_flydigi_info(&vec![0u8; 33]), None);
+    }
+
+    #[test]
+    fn flydigi_session_drains_skips_foreign_reports_and_writes_once() {
+        let valid = flydigi_reply(0x08, 152, 2);
+        let mut io = ScriptedTransport::new(vec![vec![0u8; 33], valid.clone()]);
+        io.stale.push_back(valid);
+        let parsed = flydigi_query(&mut io, 33, 33);
+        assert_eq!(parsed.map(|info| info.level), Some(80));
+        assert_eq!(parsed.map(|info| info.charging), Some(false));
+        assert_eq!(io.writes, vec![flydigi_info_request(33)]);
+        assert_eq!(io.read_calls.len(), 4);
+    }
+
+    #[test]
+    fn sony_inzone_candidate_requires_the_exact_vendor_collection() {
+        assert!(sony_inzone_collection_ok(0x0EC2, 0xFF04, 1, 64, 64));
+        assert!(!sony_inzone_collection_ok(0x0CE6, 0xFF04, 1, 64, 64));
+        assert!(!sony_inzone_collection_ok(0x0EC2, 0xFF00, 1, 64, 64));
+        assert!(!sony_inzone_collection_ok(0x0EC2, 0xFF04, 2, 64, 64));
+        assert!(!sony_inzone_collection_ok(0x0EC2, 0xFF04, 1, 65, 64));
+    }
+
+    #[test]
+    fn sony_inzone_request_matches_sequence_and_checksum() {
+        let request = sony_inzone_request(0x1234);
+        assert_eq!(
+            &request[..14],
+            &[
+                0x02, 0x0C, 0x01, 0x00, 0xFC, 0x08, 0x96, 0xC3, 0x41, 0x04, 0x01, 0x34, 0x12, 0xE5,
+            ]
+        );
+        assert!(request[14..].iter().all(|value| *value == 0));
+    }
+
+    #[test]
+    fn sony_inzone_parser_splits_buds_case_and_charge_states() {
+        let reply = sony_inzone_reply((0, 80), (1, 75), (2, 50));
+        assert_eq!(
+            parse_sony_inzone_response(&reply),
+            Some(SonyInzoneState {
+                left: Some(SonyInzonePart {
+                    level: 80,
+                    charging: Some(false),
+                }),
+                right: Some(SonyInzonePart {
+                    level: 75,
+                    charging: Some(true),
+                }),
+                case: Some(SonyInzonePart {
+                    level: 50,
+                    charging: None,
+                }),
+            })
+        );
+        let offline = sony_inzone_reply((0, 0xFF), (1, 0xFF), (0, 25));
+        let state = parse_sony_inzone_response(&offline).unwrap();
+        assert_eq!(state.left, None);
+        assert_eq!(state.right, None);
+        assert_eq!(state.case.map(|part| part.level), Some(25));
+    }
+
+    #[test]
+    fn sony_inzone_parser_rejects_wrong_shape_checksum_and_levels() {
+        let good = sony_inzone_reply((0, 80), (1, 75), (0, 50));
+        for (index, value) in [(0, 0x01), (6, 0x95), (7, 0xC2), (8, 0x13), (19, 0x00)] {
+            let mut bad = good.clone();
+            bad[index] = value;
+            assert_eq!(parse_sony_inzone_response(&bad), None, "byte {index}");
+        }
+        assert_eq!(parse_sony_inzone_response(&good[..19]), None);
+        let mut bad_level = good;
+        bad_level[14] = 101;
+        bad_level[19] = bad_level[6..19]
+            .iter()
+            .fold(0u8, |sum, value| sum.wrapping_add(*value));
+        assert_eq!(parse_sony_inzone_response(&bad_level).unwrap().left, None);
+    }
+
+    #[test]
+    fn sony_inzone_session_drains_and_skips_foreign_reports() {
+        let valid = sony_inzone_reply((0, 80), (1, 75), (0, 50));
+        let mut io = ScriptedTransport::new(vec![vec![0u8; 64], valid.clone()]);
+        io.stale.push_back(valid);
+        let state = sony_inzone_query(&mut io, 7).unwrap();
+        assert_eq!(state.left.map(|part| part.level), Some(80));
+        assert_eq!(io.writes, vec![sony_inzone_request(7).to_vec()]);
+        assert_eq!(io.read_calls.len(), 4);
     }
 
     #[test]
@@ -1550,8 +3188,7 @@ mod tests {
         );
         assert_eq!(report.map(MouseBatteryReport::level), Some(70));
         assert_eq!(
-            parse_1d57_battery(&[0x03, 0x10, 0x40, 0x00, 10])
-                .map(MouseBatteryReport::level),
+            parse_1d57_battery(&[0x03, 0x10, 0x40, 0x00, 10]).map(MouseBatteryReport::level),
             Some(100)
         );
     }
@@ -1905,7 +3542,11 @@ mod tests {
             None
         );
         assert_eq!(
-            parse_razer_pa_level(&good[..RAZER_PA_BLACKSHARK.length_offset + 1], RAZER_PA_BLACKSHARK, 0x21),
+            parse_razer_pa_level(
+                &good[..RAZER_PA_BLACKSHARK.length_offset + 1],
+                RAZER_PA_BLACKSHARK,
+                0x21
+            ),
             None
         );
         let mut out_of_range = good;
@@ -1922,12 +3563,16 @@ mod tests {
         assert_eq!(blackshark_remote.len(), 64);
         assert_eq!(
             &blackshark_remote[..12],
-            &[0x02, 0x80, 0x07, 0x00, 0x00, 0x50, 0x41, 0x0E, 0x00, 0x02, 0xE1, 0x01]
+            &[
+                0x02, 0x80, 0x07, 0x00, 0x00, 0x50, 0x41, 0x0E, 0x00, 0x02, 0xE1, 0x01
+            ]
         );
         let blackshark_query = razer_pa_query(RAZER_PA_BLACKSHARK, 0x2A);
         assert_eq!(
             &blackshark_query[..13],
-            &[0x02, 0x80, 0x08, 0x00, 0x00, 0x50, 0x41, 0x08, 0x00, 0x03, 0x2A, 0x00, 0x00]
+            &[
+                0x02, 0x80, 0x08, 0x00, 0x00, 0x50, 0x41, 0x08, 0x00, 0x03, 0x2A, 0x00, 0x00
+            ]
         );
 
         let barracuda_remote = razer_pa_remote(RAZER_PA_BARRACUDA, true);
@@ -1945,10 +3590,7 @@ mod tests {
     #[test]
     fn razer_pa_charging_rejects_unknown_state() {
         let unknown = razer_pa_frame(RAZER_PA_BLACKSHARK, 0x2A, 2);
-        assert_eq!(
-            parse_razer_pa_charging(&unknown, RAZER_PA_BLACKSHARK),
-            None
-        );
+        assert_eq!(parse_razer_pa_charging(&unknown, RAZER_PA_BLACKSHARK), None);
         let mut wrong_ack = unknown;
         wrong_ack[RAZER_PA_BLACKSHARK.ack_offset] = 0x00;
         assert_eq!(
@@ -2036,7 +3678,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn playstation_bluetooth_report_ids_0x12_to_0x19_share_the_status_offset() {
         for report_id in 0x11..=0x19 {
@@ -2059,7 +3700,10 @@ mod tests {
         let mut usb = vec![0u8; 78];
         usb[0] = 0x01;
         usb[30] = 0x09;
-        assert_eq!(playstation_battery_report(&usb, false), Some((90, Some(false))));
+        assert_eq!(
+            playstation_battery_report(&usb, false),
+            Some((90, Some(false)))
+        );
 
         let mut unknown = vec![0u8; 78];
         unknown[0] = 0x1A;
@@ -2151,7 +3795,10 @@ mod tests {
         );
         assert_eq!(result, None);
         // wake remote-on, then three (remote-on, query) attempts, then off
-        assert_eq!(io.writes.len(), 1 + RAZER_PA_BLACKSHARK.attempts as usize * 2 + 1);
+        assert_eq!(
+            io.writes.len(),
+            1 + RAZER_PA_BLACKSHARK.attempts as usize * 2 + 1
+        );
         let last = io.writes.last().unwrap();
         assert_eq!(last[RAZER_PA_BLACKSHARK.marker_offset + 6], 0);
         assert_eq!(&last[..3], &[0x02, 0x80, 0x07]);
@@ -2191,12 +3838,91 @@ mod tests {
     }
 
     #[test]
+    fn steam_lizard_request_matches_the_sdl_feature_report() {
+        let request = steam_disable_lizard_request();
+        assert_eq!(request.len(), 64);
+        assert_eq!(&request[..6], &[0x01, 0x87, 0x03, 0x09, 0x00, 0x00]);
+        assert!(request[6..].iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn steam_slot_reports_gate_the_controller_connection() {
+        assert_eq!(steam_connection_state(&[0x46, 0x02]), Some(true));
+        assert_eq!(steam_connection_state(&[0x79, 0x02]), Some(true));
+        assert_eq!(steam_connection_state(&[0x46, 0x01]), Some(false));
+        assert_eq!(steam_connection_state(&[0x79, 0x01]), Some(false));
+        assert_eq!(steam_connection_state(&[0x46, 0x00]), None);
+        assert_eq!(steam_connection_state(&[0x46]), None);
+        for report_id in [0x42, 0x45, 0x47] {
+            assert_eq!(steam_connection_state(&[report_id, 0x00]), Some(true));
+        }
+        assert_eq!(steam_connection_state(&[0x43, 0x01, 55]), None);
+    }
+
+    #[test]
+    fn razer_x_control_request_is_a_zero_padded_race_frame() {
+        let request = razer_x_control_request(0x20, 0xE3, &[]);
+        assert_eq!(request.len(), 64);
+        assert_eq!(
+            &request[..9],
+            &[0x01, 0x80, 0x06, 0x50, 0x41, 0x0E, 0x20, 0x01, 0xE3]
+        );
+        assert!(request[9..].iter().all(|byte| *byte == 0));
+
+        let route = razer_x_control_request(0x22, 0xE1, &[0x01]);
+        assert_eq!(
+            &route[..10],
+            &[0x01, 0x80, 0x07, 0x50, 0x41, 0x0E, 0x22, 0x02, 0xE1, 0x01]
+        );
+        assert!(route[10..].iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn razer_x_ack_and_data_validate_sequence_status_and_command() {
+        let mut ack = vec![0u8; 64];
+        ack[..6].copy_from_slice(&[0x01, 0x80, 0x0D, 0x50, 0x49, 0x01]);
+        ack[13..16].copy_from_slice(&[0x0E, 0xA0, 0x00]);
+        assert_eq!(razer_x_ack(&ack, 0x20), Some(true));
+        assert_eq!(razer_x_ack(&ack, 0x21), None);
+        ack[15] = 1;
+        assert_eq!(razer_x_ack(&ack, 0x20), Some(false));
+
+        let mut data = vec![0u8; 64];
+        data[..15].copy_from_slice(&[
+            0x01, 0x80, 0x0C, 0x50, 0x49, 0x0E, 0xFD, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0xE3,
+            0x01,
+        ]);
+        assert_eq!(razer_x_data(&data, 0xE3), Some(1));
+        data[14] = 0;
+        assert_eq!(razer_x_data(&data, 0xE3), Some(0));
+        assert_eq!(razer_x_data(&data, 0xE6), None);
+    }
+
+    #[test]
+    fn razer_x_control_requires_ack_before_accepting_data() {
+        let mut ack = vec![0u8; 64];
+        ack[..6].copy_from_slice(&[0x01, 0x80, 0x0D, 0x50, 0x49, 0x01]);
+        ack[13..16].copy_from_slice(&[0x0E, 0xA0, 0x00]);
+        let mut data = vec![0u8; 64];
+        data[..15].copy_from_slice(&[
+            0x01, 0x80, 0x0C, 0x50, 0x49, 0x0E, 0xFD, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0xE3,
+            0x01,
+        ]);
+        let mut io = ScriptedTransport::new(vec![data, ack]);
+        assert_eq!(razer_x_control(&mut io, 0x20, 0xE3, &[]), Some(1));
+        assert_eq!(io.writes.len(), 1);
+        assert_eq!(io.writes[0], razer_x_control_request(0x20, 0xE3, &[]));
+    }
+
+    #[test]
     fn razer_pa_accepts_only_the_captured_vendor_pages() {
-        assert!(super::razer_pa_collection_ok(0x053A, 0xFF00));
-        assert!(!super::razer_pa_collection_ok(0x053A, 0xFF14));
-        assert!(super::razer_pa_collection_ok(0x0555, 0xFF14));
-        assert!(super::razer_pa_collection_ok(0x0556, 0xFF00));
-        assert!(!super::razer_pa_collection_ok(0x0556, 0x0001));
+        assert!(razer_pa_collection_ok(0x053A, 0xFF00));
+        assert!(!razer_pa_collection_ok(0x053A, 0xFF14));
+        assert!(razer_pa_collection_ok(0x0552, 0xFF00));
+        assert!(!razer_pa_collection_ok(0x0552, 0x0001));
+        assert!(razer_pa_collection_ok(0x0555, 0xFF14));
+        assert!(razer_pa_collection_ok(0x0556, 0xFF00));
+        assert!(!razer_pa_collection_ok(0x0556, 0x0001));
     }
 
     #[test]
@@ -2254,8 +3980,7 @@ mod tests {
             None
         );
 
-        let mut silent_confirm =
-            ScriptedTransport::new(vec![corsair_level_reply(0x1B7F, 550)]);
+        let mut silent_confirm = ScriptedTransport::new(vec![corsair_level_reply(0x1B7F, 550)]);
         assert_eq!(
             corsair_query(&mut silent_confirm, 0x1B7F, &timings, deadline),
             Some((55, None)),

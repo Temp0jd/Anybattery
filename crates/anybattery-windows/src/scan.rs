@@ -1,10 +1,10 @@
 use anybattery_core::{
-    now_unix, BatteryReading, BatterySource, BatteryStatus, Confidence, DeviceId, DeviceKind,
-    DeviceSnapshot, Settings,
+    BatteryReading, BatterySource, BatteryStatus, Confidence, DeviceId, DeviceKind, DeviceSnapshot,
+    Settings, now_unix,
 };
 use std::collections::HashMap;
 
-use crate::{bluetooth, hid, vendor, xbox};
+use crate::{apple, bluetooth, hid, vendor, xbox};
 
 #[derive(Clone, Debug, Default)]
 pub struct ScanResult {
@@ -31,7 +31,10 @@ pub fn scan(settings: &Settings) -> ScanResult {
             .unwrap_or_else(|| snapshot.id.0.clone());
         diagnostics.push(format!(
             "  蓝牙 {} · {} · {} · 电量 {:?}",
-            snapshot.name, snapshot.status.label_zh(), device.instance_id, device.battery
+            snapshot.name,
+            snapshot.status.label_zh(),
+            device.instance_id,
+            device.battery
         ));
         insert(&mut map, key, snapshot);
     }
@@ -56,7 +59,14 @@ pub fn scan(settings: &Settings) -> ScanResult {
             .container_id
             .as_ref()
             .map(|id| format!("container:{}", id))
-            .unwrap_or_else(|| format!("hid:{:04X}:{:04X}:{}", info.vendor_id, info.product_id, hid::short_hash(&info.path)));
+            .unwrap_or_else(|| {
+                format!(
+                    "hid:{:04X}:{:04X}:{}",
+                    info.vendor_id,
+                    info.product_id,
+                    hid::short_hash(&info.path)
+                )
+            });
 
         let readings = vendor::read_vendor_with_diagnostics(info, &oem_paths, &mut diagnostics);
         if !readings.is_empty() {
@@ -111,6 +121,18 @@ pub fn scan(settings: &Settings) -> ScanResult {
         insert(&mut map, key, controller);
     }
 
+    let apple_devices = apple::snapshots(now, &bluetooth_devices);
+    diagnostics.push(format!("Apple Continuity 电量卡: {}", apple_devices.len()));
+    for snapshot in apple_devices {
+        diagnostics.push(format!(
+            "  Apple {} · {} · {:?}",
+            snapshot.name,
+            snapshot.status.label_zh(),
+            snapshot.battery.level_percent()
+        ));
+        insert(&mut map, snapshot.id.0.clone(), snapshot);
+    }
+
     let mut devices: Vec<DeviceSnapshot> = map
         .into_values()
         .filter(|device| settings.show_unknown || device.battery.is_known())
@@ -125,16 +147,24 @@ pub fn scan(settings: &Settings) -> ScanResult {
     }
 }
 
-fn snapshot_from_vendor(info: &hid::HidInterface, reading: &vendor::VendorReading, now: u64) -> DeviceSnapshot {
+fn snapshot_from_vendor(
+    info: &hid::HidInterface,
+    reading: &vendor::VendorReading,
+    now: u64,
+) -> DeviceSnapshot {
     let name = reading
         .name
         .clone()
         .or_else(|| (!info.product.is_empty()).then(|| info.product.clone()))
         .unwrap_or_else(|| info.label());
-    let mut id = info
-        .container_id
-        .clone()
-        .unwrap_or_else(|| format!("{:04X}:{:04X}:{}", info.vendor_id, info.product_id, hid::short_hash(&info.path)));
+    let mut id = info.container_id.clone().unwrap_or_else(|| {
+        format!(
+            "{:04X}:{:04X}:{}",
+            info.vendor_id,
+            info.product_id,
+            hid::short_hash(&info.path)
+        )
+    });
     if let Some(suffix) = &reading.key_suffix {
         id.push(':');
         id.push_str(suffix);
@@ -142,20 +172,33 @@ fn snapshot_from_vendor(info: &hid::HidInterface, reading: &vendor::VendorReadin
     DeviceSnapshot::new(
         DeviceId::new("hid", &id),
         name.clone(),
-        reading.kind.unwrap_or_else(|| DeviceKind::infer_from_name(&name)),
+        reading
+            .kind
+            .unwrap_or_else(|| DeviceKind::infer_from_name(&name)),
         hid::transport_for_product(&info.path, info.vendor_id, info.product_id),
-        BatterySource::new(reading.provider, reading.verification, reading.detail.clone()),
+        BatterySource::new(
+            reading.provider,
+            reading.verification,
+            reading.detail.clone(),
+        ),
     )
-    .with_battery(BatteryReading::percent(reading.level, reading.charging), now)
+    .with_battery(
+        BatteryReading::percent(reading.level, reading.charging),
+        now,
+    )
     .with_detail(reading.detail.clone())
     .with_path(&info.path)
 }
 
 fn unsupported_snapshot(info: &hid::HidInterface, now: u64) -> DeviceSnapshot {
-    let id = info
-        .container_id
-        .clone()
-        .unwrap_or_else(|| format!("{:04X}:{:04X}:{}", info.vendor_id, info.product_id, hid::short_hash(&info.path)));
+    let id = info.container_id.clone().unwrap_or_else(|| {
+        format!(
+            "{:04X}:{:04X}:{}",
+            info.vendor_id,
+            info.product_id,
+            hid::short_hash(&info.path)
+        )
+    });
     let mut snapshot = DeviceSnapshot::new(
         DeviceId::new("hid", &id),
         info.label(),
@@ -174,15 +217,44 @@ fn unsupported_snapshot(info: &hid::HidInterface, now: u64) -> DeviceSnapshot {
 fn likely_wireless(info: &hid::HidInterface) -> bool {
     let name = info.product.to_lowercase();
     let words = [
-        "wireless", "hyperspeed", "lightspeed", "receiver", "dongle", "2.4g", "air", "pro",
+        "wireless",
+        "hyperspeed",
+        "lightspeed",
+        "receiver",
+        "dongle",
+        "2.4g",
+        "air",
+        "pro",
     ];
     words.iter().any(|word| name.contains(word))
         || hid::is_wireless_product(info.vendor_id, info.product_id)
         || matches!(
             info.vendor_id,
-            0x046D | 0x1532 | 0x3554 | 0x373B | 0x3710 | 0x3770 | 0x3057 | 0x3367 | 0x1915
-                | 0x3654 | 0x1038 | 0x03F0 | 0x1B1C | 0x0B05 | 0x3434 | 0x388D | 0x1E71
-                | 0x36A7 | 0x373E | 0x2023 | 0x5253 | 0x3329 | 0x0ECB | 0x28DE | 0x1D57
+            0x046D
+                | 0x1532
+                | 0x3554
+                | 0x373B
+                | 0x3710
+                | 0x3770
+                | 0x3057
+                | 0x3367
+                | 0x1915
+                | 0x3654
+                | 0x1038
+                | 0x03F0
+                | 0x1B1C
+                | 0x0B05
+                | 0x3434
+                | 0x388D
+                | 0x1E71
+                | 0x36A7
+                | 0x373E
+                | 0x2023
+                | 0x5253
+                | 0x3329
+                | 0x0ECB
+                | 0x28DE
+                | 0x1D57
         )
 }
 
@@ -228,5 +300,9 @@ fn score(snapshot: &DeviceSnapshot) -> i32 {
         BatteryReading::Coarse { .. } => 50,
         BatteryReading::Unknown => 20,
     };
-    if snapshot.status.is_live() { base + 5 } else { base }
+    if snapshot.status.is_live() {
+        base + 5
+    } else {
+        base
+    }
 }

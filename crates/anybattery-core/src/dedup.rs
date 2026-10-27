@@ -5,11 +5,7 @@ pub fn bluetooth_address(instance_id: &str) -> Option<String> {
     let idx = upper.find("DEV_")?;
     let rest = &upper[idx + 4..];
     let hex: String = rest.chars().take_while(|c| c.is_ascii_hexdigit()).collect();
-    if hex.len() == 12 {
-        Some(hex)
-    } else {
-        None
-    }
+    if hex.len() == 12 { Some(hex) } else { None }
 }
 
 /// Remove Windows' duplicated Bluetooth endpoint suffixes so one headset is one row.
@@ -50,8 +46,14 @@ mod tests {
 
     #[test]
     fn cleans_duplicate_names() {
-        assert_eq!(clean_bluetooth_name("WH-1000XM5 Hands-Free AG Audio"), "WH-1000XM5");
+        assert_eq!(
+            clean_bluetooth_name("WH-1000XM5 Hands-Free AG Audio"),
+            "WH-1000XM5"
+        );
         assert_eq!(clean_bluetooth_name("AirPods Pro (LE)"), "AirPods Pro");
-        assert_eq!(clean_bluetooth_name("Xbox Wireless Controller"), "Xbox Wireless Controller");
+        assert_eq!(
+            clean_bluetooth_name("Xbox Wireless Controller"),
+            "Xbox Wireless Controller"
+        );
     }
 }

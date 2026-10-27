@@ -1,32 +1,30 @@
 use anybattery_core::{BatterySource, Confidence, DeviceId, DeviceKind, DeviceSnapshot, Transport};
 use std::ffi::c_void;
 use std::mem::size_of;
-use windows::core::{GUID, HRESULT, PCWSTR};
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
-    CM_Get_Device_IDW, CM_Get_DevNode_PropertyW, SetupDiDestroyDeviceInfoList,
+    CM_Get_DevNode_PropertyW, CM_Get_Device_IDW, CR_BUFFER_SMALL, CR_SUCCESS,
+    DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, SP_DEVICE_INTERFACE_DATA,
+    SP_DEVICE_INTERFACE_DETAIL_DATA_W, SP_DEVINFO_DATA, SetupDiDestroyDeviceInfoList,
     SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW, SetupDiGetDeviceInterfaceDetailW,
-    CR_BUFFER_SMALL, CR_SUCCESS, DIGCF_DEVICEINTERFACE, DIGCF_PRESENT,
-    SP_DEVICE_INTERFACE_DATA, SP_DEVICE_INTERFACE_DETAIL_DATA_W, SP_DEVINFO_DATA,
 };
 use windows::Win32::Devices::HumanInterfaceDevice::{
+    HIDD_ATTRIBUTES, HIDP_CAPS, HIDP_REPORT_TYPE, HIDP_STATUS_SUCCESS, HIDP_VALUE_CAPS,
     HidD_FreePreparsedData, HidD_GetAttributes, HidD_GetFeature, HidD_GetHidGuid,
-    HidD_GetPreparsedData, HidD_GetProductString, HidD_SetFeature, HidP_GetCaps,
-    HidP_GetUsageValue, HidP_GetValueCaps, HidP_Feature, HidP_Input, HIDD_ATTRIBUTES,
-    HIDP_CAPS, HIDP_REPORT_TYPE, HIDP_STATUS_SUCCESS, HIDP_VALUE_CAPS, PHIDP_PREPARSED_DATA,
+    HidD_GetPreparsedData, HidD_GetProductString, HidD_SetFeature, HidP_Feature, HidP_GetCaps,
+    HidP_GetUsageValue, HidP_GetValueCaps, HidP_Input, PHIDP_PREPARSED_DATA,
 };
 use windows::Win32::Devices::Properties::{
     DEVPKEY_Device_ContainerId, DEVPKEY_Device_FriendlyName, DEVPKEY_Device_HardwareIds,
     DEVPROP_TYPE_GUID, DEVPROP_TYPE_STRING, DEVPROP_TYPE_STRING_LIST,
 };
-use windows::Win32::Foundation::{
-    CloseHandle, ERROR_IO_PENDING, HANDLE, WAIT_OBJECT_0,
-};
+use windows::Win32::Foundation::{CloseHandle, ERROR_IO_PENDING, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, ReadFile, WriteFile, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OVERLAPPED, FILE_FLAGS_AND_ATTRIBUTES,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OVERLAPPED, FILE_FLAGS_AND_ATTRIBUTES,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, ReadFile, WriteFile,
 };
 use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+use windows::core::{GUID, HRESULT, PCWSTR};
 
 pub const HID_USAGE_PAGE_GENERIC_DEVICE: u16 = 0x0006;
 pub const HID_USAGE_GENERIC_DEVICE_BATTERY_STRENGTH: u16 = 0x0020;
@@ -39,9 +37,18 @@ pub const HID_USAGE_BATTERY_SYSTEM_RELATIVE_STATE_OF_CHARGE: u16 = 0x0064;
 pub const HID_USAGE_BATTERY_SYSTEM_ABSOLUTE_STATE_OF_CHARGE: u16 = 0x0065;
 
 const STANDARD_BATTERY_CANDIDATES: [(u16, u16); 4] = [
-    (HID_USAGE_PAGE_BATTERY_SYSTEM, HID_USAGE_BATTERY_SYSTEM_RELATIVE_STATE_OF_CHARGE),
-    (HID_USAGE_PAGE_BATTERY_SYSTEM, HID_USAGE_BATTERY_SYSTEM_ABSOLUTE_STATE_OF_CHARGE),
-    (HID_USAGE_PAGE_GENERIC_DEVICE, HID_USAGE_GENERIC_DEVICE_BATTERY_STRENGTH),
+    (
+        HID_USAGE_PAGE_BATTERY_SYSTEM,
+        HID_USAGE_BATTERY_SYSTEM_RELATIVE_STATE_OF_CHARGE,
+    ),
+    (
+        HID_USAGE_PAGE_BATTERY_SYSTEM,
+        HID_USAGE_BATTERY_SYSTEM_ABSOLUTE_STATE_OF_CHARGE,
+    ),
+    (
+        HID_USAGE_PAGE_GENERIC_DEVICE,
+        HID_USAGE_GENERIC_DEVICE_BATTERY_STRENGTH,
+    ),
     (HID_USAGE_PAGE_DIGITIZER, HID_USAGE_DIGITIZER_BATTERY),
 ];
 
@@ -69,7 +76,10 @@ impl HidInterface {
             return self.product.clone();
         }
         if !self.manufacturer.is_empty() {
-            return format!("{} {:04X}:{:04X}", self.manufacturer, self.vendor_id, self.product_id);
+            return format!(
+                "{} {:04X}:{:04X}",
+                self.manufacturer, self.vendor_id, self.product_id
+            );
         }
         format!("HID {:04X}:{:04X}", self.vendor_id, self.product_id)
     }
@@ -97,11 +107,7 @@ pub fn enumerate() -> Vec<HidInterface> {
     loop {
         let mut iface = SP_DEVICE_INTERFACE_DATA::default();
         iface.cbSize = size_of::<SP_DEVICE_INTERFACE_DATA>() as u32;
-        if unsafe {
-            SetupDiEnumDeviceInterfaces(set, None, &guid, index, &mut iface)
-        }
-        .is_err()
-        {
+        if unsafe { SetupDiEnumDeviceInterfaces(set, None, &guid, index, &mut iface) }.is_err() {
             break;
         }
         index += 1;
@@ -161,7 +167,10 @@ pub fn enumerate() -> Vec<HidInterface> {
 }
 
 fn inspect(path: &str) -> Option<HidInterface> {
-    let handle = open_path(path, false)?;
+    // Attributes, strings and preparsed caps do not require read access. A
+    // zero-access synchronous handle also matches the working Razer reference
+    // and avoids drivers that report empty caps on an overlapped read handle.
+    let handle = open_sync(path).ok()?;
     let mut attrs = HIDD_ATTRIBUTES {
         Size: size_of::<HIDD_ATTRIBUTES>() as u32,
         ..Default::default()
@@ -273,14 +282,25 @@ pub fn open_sync(path: &str) -> Result<HANDLE, u32> {
     }
 }
 
+pub fn with_sync_handle<T>(path: &str, f: impl FnOnce(HANDLE) -> Option<T>) -> Option<T> {
+    let handle = open_sync(path).ok()?;
+    let result = f(handle);
+    close(handle);
+    result
+}
+
 pub fn close(handle: HANDLE) {
-    unsafe { CloseHandle(handle) };
+    let _ = unsafe { CloseHandle(handle) };
 }
 
 fn product_string(handle: HANDLE) -> String {
     let mut buf = [0u16; 256];
     let ok = unsafe {
-        HidD_GetProductString(handle, buf.as_mut_ptr() as *mut c_void, (buf.len() * 2) as u32)
+        HidD_GetProductString(
+            handle,
+            buf.as_mut_ptr() as *mut c_void,
+            (buf.len() * 2) as u32,
+        )
     };
     if ok { trim_wide(&buf) } else { String::new() }
 }
@@ -300,19 +320,17 @@ fn manufacturer_string(handle: HANDLE) -> String {
 pub fn feature_get(path: &str, length: usize) -> Option<Vec<u8>> {
     with_handle(path, false, |handle| {
         let mut buf = vec![0u8; length.max(1)];
-        let ok = unsafe {
-            HidD_GetFeature(
-                handle,
-                buf.as_mut_ptr() as *mut c_void,
-                buf.len() as u32,
-            )
-        };
+        let ok =
+            unsafe { HidD_GetFeature(handle, buf.as_mut_ptr() as *mut c_void, buf.len() as u32) };
         if ok { Some(buf) } else { None }
     })
 }
 
 pub fn feature_set(path: &str, bytes: &[u8]) -> bool {
-    with_handle(path, true, |handle| feature_set_on(handle, bytes).then_some(())).is_some()
+    with_handle(path, true, |handle| {
+        feature_set_on(handle, bytes).then_some(())
+    })
+    .is_some()
 }
 
 /// Set one feature report on an already-open handle.
@@ -324,13 +342,23 @@ pub fn feature_set_on(handle: HANDLE, bytes: &[u8]) -> bool {
     if bytes.is_empty() || bytes.len() > 4096 {
         return false;
     }
+    unsafe { HidD_SetFeature(handle, bytes.as_ptr() as *const c_void, bytes.len() as u32) }
+}
+
+pub fn feature_get_on(handle: HANDLE, report_id: u8, length: usize) -> Option<Vec<u8>> {
+    if length == 0 || length > 4096 {
+        return None;
+    }
+    let mut reply = vec![0u8; length];
+    reply[0] = report_id;
     unsafe {
-        HidD_SetFeature(
+        HidD_GetFeature(
             handle,
-            bytes.as_ptr() as *const c_void,
-            bytes.len() as u32,
+            reply.as_mut_ptr() as *mut c_void,
+            reply.len() as u32,
         )
     }
+    .then_some(reply)
 }
 
 /// Set one feature report and read replies from the same open handle.
@@ -586,11 +614,16 @@ pub fn feature_exchange<T>(
 }
 
 pub fn output_write(path: &str, bytes: &[u8]) -> bool {
-    with_handle(path, true, |handle| write_report(handle, bytes).then_some(())).is_some()
+    with_handle(path, true, |handle| {
+        write_report(handle, bytes).then_some(())
+    })
+    .is_some()
 }
 
 pub fn input_read(path: &str, length: usize, timeout_ms: u32) -> Option<Vec<u8>> {
-    with_handle(path, false, |handle| read_overlapped(handle, length, timeout_ms))
+    with_handle(path, false, |handle| {
+        read_overlapped(handle, length, timeout_ms)
+    })
 }
 
 pub fn write_report(handle: HANDLE, bytes: &[u8]) -> bool {
@@ -629,7 +662,8 @@ pub fn listen<T>(
     mut parse: impl FnMut(&[u8]) -> Option<T>,
 ) -> Option<T> {
     with_handle(path, false, |handle| {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(total_ms as u64);
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_millis(total_ms as u64);
         while std::time::Instant::now() < deadline {
             if let Some(report) = read_overlapped(handle, length, 150) {
                 if let Some(value) = parse(&report) {
@@ -641,7 +675,12 @@ pub fn listen<T>(
     })
 }
 
-pub fn write_and_read(path: &str, request: &[u8], read_len: usize, timeout_ms: u32) -> Option<Vec<u8>> {
+pub fn write_and_read(
+    path: &str,
+    request: &[u8],
+    read_len: usize,
+    timeout_ms: u32,
+) -> Option<Vec<u8>> {
     with_handle(path, true, |handle| {
         if !write_report(handle, request) {
             return None;
@@ -663,7 +702,8 @@ pub fn write_and_listen<T>(
         if !write_report(handle, request) {
             return None;
         }
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(total_ms as u64);
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_millis(total_ms as u64);
         while std::time::Instant::now() < deadline {
             if let Some(report) = read_overlapped(handle, read_len, 150) {
                 if let Some(value) = parse(&report) {
@@ -735,10 +775,14 @@ pub fn read_standard_battery(info: &HidInterface) -> Option<StandardBattery> {
                 return None;
             }
             for (page, usage) in STANDARD_BATTERY_CANDIDATES {
-                if let Some(battery) = read_feature_usage(handle, preparsed, caps.FeatureReportByteLength, page, usage) {
+                if let Some(battery) =
+                    read_feature_usage(handle, preparsed, caps.FeatureReportByteLength, page, usage)
+                {
                     return Some(battery);
                 }
-                if let Some(battery) = read_input_usage(handle, preparsed, caps.InputReportByteLength, page, usage) {
+                if let Some(battery) =
+                    read_input_usage(handle, preparsed, caps.InputReportByteLength, page, usage)
+                {
                     return Some(battery);
                 }
             }
@@ -749,7 +793,11 @@ pub fn read_standard_battery(info: &HidInterface) -> Option<StandardBattery> {
     })
 }
 
-fn value_caps(preparsed: PHIDP_PREPARSED_DATA, report_type: HIDP_REPORT_TYPE, count: u16) -> Vec<HIDP_VALUE_CAPS> {
+fn value_caps(
+    preparsed: PHIDP_PREPARSED_DATA,
+    report_type: HIDP_REPORT_TYPE,
+    count: u16,
+) -> Vec<HIDP_VALUE_CAPS> {
     if count == 0 {
         return Vec::new();
     }
@@ -776,7 +824,11 @@ fn cap_matches(cap: &HIDP_VALUE_CAPS, page: u16, usage: u16) -> bool {
     actual && cap.BitSize > 0 && cap.BitSize <= 32
 }
 
-fn find_caps<'a>(caps: &'a [HIDP_VALUE_CAPS], page: u16, usage: u16) -> Option<&'a HIDP_VALUE_CAPS> {
+fn find_caps<'a>(
+    caps: &'a [HIDP_VALUE_CAPS],
+    page: u16,
+    usage: u16,
+) -> Option<&'a HIDP_VALUE_CAPS> {
     caps.iter().find(|cap| cap_matches(cap, page, usage))
 }
 
@@ -842,7 +894,11 @@ fn read_feature_usage(
     let mut buffer = vec![0u8; report_len as usize];
     buffer[0] = report_id;
     let ok = unsafe {
-        HidD_GetFeature(handle, buffer.as_mut_ptr() as *mut c_void, buffer.len() as u32)
+        HidD_GetFeature(
+            handle,
+            buffer.as_mut_ptr() as *mut c_void,
+            buffer.len() as u32,
+        )
     };
     if !ok {
         return None;
@@ -917,14 +973,29 @@ fn extract_usage(
     if max <= min {
         return None;
     }
-    let percent = ((value as i64 - min as i64) * 100 / (max as i64 - min as i64)).clamp(0, 100) as u8;
+    let percent =
+        ((value as i64 - min as i64) * 100 / (max as i64 - min as i64)).clamp(0, 100) as u8;
     if percent == 0 && value as i32 == min {
         // A zero reading is usually "not reported yet" rather than empty.
         return None;
     }
     let charging = resolve_charging(
-        report_flag(preparsed, report_type, report, caps, collection, HID_USAGE_BATTERY_SYSTEM_CHARGING),
-        report_flag(preparsed, report_type, report, caps, collection, HID_USAGE_BATTERY_SYSTEM_DISCHARGING),
+        report_flag(
+            preparsed,
+            report_type,
+            report,
+            caps,
+            collection,
+            HID_USAGE_BATTERY_SYSTEM_CHARGING,
+        ),
+        report_flag(
+            preparsed,
+            report_type,
+            report,
+            caps,
+            collection,
+            HID_USAGE_BATTERY_SYSTEM_DISCHARGING,
+        ),
     );
     Some(StandardBattery {
         level: percent,
@@ -985,16 +1056,24 @@ fn resolve_charging(charging: Option<u32>, discharging: Option<u32>) -> Option<b
     }
 }
 
-pub fn standard_snapshot(info: &HidInterface, battery: &StandardBattery, now: u64) -> DeviceSnapshot {
+pub fn standard_snapshot(
+    info: &HidInterface,
+    battery: &StandardBattery,
+    now: u64,
+) -> DeviceSnapshot {
     let kind = DeviceKind::infer_from_name(&info.product);
     let transport = transport_for_product(&info.path, info.vendor_id, info.product_id);
     DeviceSnapshot::new(
         DeviceId::new(
             "hid",
-            &info
-                .container_id
-                .clone()
-                .unwrap_or_else(|| format!("{:04X}:{:04X}:{}", info.vendor_id, info.product_id, short_hash(&info.path))),
+            &info.container_id.clone().unwrap_or_else(|| {
+                format!(
+                    "{:04X}:{:04X}:{}",
+                    info.vendor_id,
+                    info.product_id,
+                    short_hash(&info.path)
+                )
+            }),
         ),
         info.label(),
         kind,
@@ -1004,7 +1083,11 @@ pub fn standard_snapshot(info: &HidInterface, battery: &StandardBattery, now: u6
             Confidence::OsReported,
             format!(
                 "usage {:04X}:{:04X}, report {:#04X}, raw {} / {}",
-                battery.usage_page, battery.usage, battery.report_id, battery.raw, battery.logical_max
+                battery.usage_page,
+                battery.usage,
+                battery.report_id,
+                battery.raw,
+                battery.logical_max
             ),
         ),
     )
@@ -1038,9 +1121,31 @@ pub fn transport_for_product(path: &str, vendor_id: u16, product_id: u16) -> Tra
 fn is_wireless_vid(vendor_id: u16) -> bool {
     matches!(
         vendor_id,
-        0x046D | 0x1532 | 0x3554 | 0x373B | 0x3710 | 0x3770 | 0x3057 | 0x3367 | 0x1915
-            | 0x3654 | 0x1038 | 0x03F0 | 0x1B1C | 0x0B05 | 0x3434 | 0x388D | 0x1E71
-            | 0x36A7 | 0x373E | 0x2023 | 0x5253 | 0x3329 | 0x0ECB | 0x28DE | 0x1D57
+        0x046D
+            | 0x1532
+            | 0x3554
+            | 0x373B
+            | 0x3710
+            | 0x3770
+            | 0x3057
+            | 0x3367
+            | 0x1915
+            | 0x3654
+            | 0x1038
+            | 0x03F0
+            | 0x1B1C
+            | 0x0B05
+            | 0x3434
+            | 0x388D
+            | 0x1E71
+            | 0x36A7
+            | 0x373E
+            | 0x2023
+            | 0x5253
+            | 0x3329
+            | 0x0ECB
+            | 0x28DE
+            | 0x1D57
     )
 }
 
@@ -1078,19 +1183,15 @@ fn devnode_instance_id(devinst: u32) -> Option<String> {
     }
 }
 
-fn devnode_property(devinst: u32, key: &windows::Win32::Foundation::DEVPROPKEY, expected: windows::Win32::Devices::Properties::DEVPROPTYPE) -> Option<Vec<u8>> {
+fn devnode_property(
+    devinst: u32,
+    key: &windows::Win32::Foundation::DEVPROPKEY,
+    expected: windows::Win32::Devices::Properties::DEVPROPTYPE,
+) -> Option<Vec<u8>> {
     let mut property_type = windows::Win32::Devices::Properties::DEVPROPTYPE(0);
     let mut size = 0u32;
-    let status = unsafe {
-        CM_Get_DevNode_PropertyW(
-            devinst,
-            key,
-            &mut property_type,
-            None,
-            &mut size,
-            0,
-        )
-    };
+    let status =
+        unsafe { CM_Get_DevNode_PropertyW(devinst, key, &mut property_type, None, &mut size, 0) };
     if status != CR_SUCCESS && status != CR_BUFFER_SMALL {
         return None;
     }
@@ -1126,7 +1227,11 @@ pub fn friendly_name(devinst: u32) -> Option<String> {
 }
 
 pub fn hardware_ids(devinst: u32) -> Vec<String> {
-    let Some(bytes) = devnode_property(devinst, &DEVPKEY_Device_HardwareIds, DEVPROP_TYPE_STRING_LIST) else {
+    let Some(bytes) = devnode_property(
+        devinst,
+        &DEVPKEY_Device_HardwareIds,
+        DEVPROP_TYPE_STRING_LIST,
+    ) else {
         return Vec::new();
     };
     let units: Vec<u16> = bytes
@@ -1282,10 +1387,20 @@ mod tests {
         let other_collection = battery_cap(HID_USAGE_BATTERY_SYSTEM_CHARGING, 3, battery_link(2));
 
         assert!(
-            flag_cap(&[battery, other_report], key, HID_USAGE_BATTERY_SYSTEM_CHARGING).is_none()
+            flag_cap(
+                &[battery, other_report],
+                key,
+                HID_USAGE_BATTERY_SYSTEM_CHARGING
+            )
+            .is_none()
         );
         assert!(
-            flag_cap(&[battery, other_collection], key, HID_USAGE_BATTERY_SYSTEM_CHARGING).is_none()
+            flag_cap(
+                &[battery, other_collection],
+                key,
+                HID_USAGE_BATTERY_SYSTEM_CHARGING
+            )
+            .is_none()
         );
     }
 
@@ -1326,26 +1441,47 @@ mod tests {
         let battery = battery_cap(
             HID_USAGE_BATTERY_SYSTEM_RELATIVE_STATE_OF_CHARGE,
             5,
-            (1, HID_USAGE_PAGE_BATTERY_SYSTEM, HID_USAGE_BATTERY_SYSTEM_RELATIVE_STATE_OF_CHARGE),
+            (
+                1,
+                HID_USAGE_PAGE_BATTERY_SYSTEM,
+                HID_USAGE_BATTERY_SYSTEM_RELATIVE_STATE_OF_CHARGE,
+            ),
         );
         let key = BatteryCollectionKey::of(&battery);
         let same_index_other_usage = battery_cap(
             HID_USAGE_BATTERY_SYSTEM_CHARGING,
             5,
-            (1, HID_USAGE_PAGE_GENERIC_DEVICE, HID_USAGE_GENERIC_DEVICE_BATTERY_STRENGTH),
+            (
+                1,
+                HID_USAGE_PAGE_GENERIC_DEVICE,
+                HID_USAGE_GENERIC_DEVICE_BATTERY_STRENGTH,
+            ),
         );
         let same_collection = battery_cap(
             HID_USAGE_BATTERY_SYSTEM_CHARGING,
             5,
-            (1, HID_USAGE_PAGE_BATTERY_SYSTEM, HID_USAGE_BATTERY_SYSTEM_RELATIVE_STATE_OF_CHARGE),
+            (
+                1,
+                HID_USAGE_PAGE_BATTERY_SYSTEM,
+                HID_USAGE_BATTERY_SYSTEM_RELATIVE_STATE_OF_CHARGE,
+            ),
         );
 
         assert!(
-            flag_cap(&[battery, same_index_other_usage], key, HID_USAGE_BATTERY_SYSTEM_CHARGING)
-                .is_none()
+            flag_cap(
+                &[battery, same_index_other_usage],
+                key,
+                HID_USAGE_BATTERY_SYSTEM_CHARGING
+            )
+            .is_none()
         );
         assert!(
-            flag_cap(&[battery, same_collection], key, HID_USAGE_BATTERY_SYSTEM_CHARGING).is_some()
+            flag_cap(
+                &[battery, same_collection],
+                key,
+                HID_USAGE_BATTERY_SYSTEM_CHARGING
+            )
+            .is_some()
         );
     }
 
@@ -1359,7 +1495,14 @@ mod tests {
         let key = BatteryCollectionKey::of(&battery);
         let charging = battery_cap(HID_USAGE_BATTERY_SYSTEM_CHARGING, 1, battery_link(1));
 
-        assert!(flag_cap(&[battery, charging, charging], key, HID_USAGE_BATTERY_SYSTEM_CHARGING).is_none());
+        assert!(
+            flag_cap(
+                &[battery, charging, charging],
+                key,
+                HID_USAGE_BATTERY_SYSTEM_CHARGING
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -1391,19 +1534,33 @@ mod tests {
         assert_eq!(
             STANDARD_BATTERY_CANDIDATES,
             [
-                (HID_USAGE_PAGE_BATTERY_SYSTEM, HID_USAGE_BATTERY_SYSTEM_RELATIVE_STATE_OF_CHARGE),
-                (HID_USAGE_PAGE_BATTERY_SYSTEM, HID_USAGE_BATTERY_SYSTEM_ABSOLUTE_STATE_OF_CHARGE),
-                (HID_USAGE_PAGE_GENERIC_DEVICE, HID_USAGE_GENERIC_DEVICE_BATTERY_STRENGTH),
+                (
+                    HID_USAGE_PAGE_BATTERY_SYSTEM,
+                    HID_USAGE_BATTERY_SYSTEM_RELATIVE_STATE_OF_CHARGE
+                ),
+                (
+                    HID_USAGE_PAGE_BATTERY_SYSTEM,
+                    HID_USAGE_BATTERY_SYSTEM_ABSOLUTE_STATE_OF_CHARGE
+                ),
+                (
+                    HID_USAGE_PAGE_GENERIC_DEVICE,
+                    HID_USAGE_GENERIC_DEVICE_BATTERY_STRENGTH
+                ),
                 (HID_USAGE_PAGE_DIGITIZER, HID_USAGE_DIGITIZER_BATTERY),
             ]
         );
         assert!(!STANDARD_BATTERY_CANDIDATES.contains(&(HID_USAGE_PAGE_BATTERY_SYSTEM, 0x0066)));
-        assert!(!STANDARD_BATTERY_CANDIDATES.iter().any(|(_, usage)| *usage == 0x0001));
+        assert!(
+            !STANDARD_BATTERY_CANDIDATES
+                .iter()
+                .any(|(_, usage)| *usage == 0x0001)
+        );
     }
 
     #[test]
     fn bthle_hid_paths_are_bluetooth_le() {
-        let path = r"\\?\BTHLE\DEV_001122334455\7&2e94cec3&0&0000#{00001812-0000-1000-8000-00805f9b34fb}";
+        let path =
+            r"\\?\BTHLE\DEV_001122334455\7&2e94cec3&0&0000#{00001812-0000-1000-8000-00805f9b34fb}";
         assert_eq!(transport_for(path, 0x046D), Transport::BluetoothLe);
     }
 
@@ -1418,7 +1575,10 @@ mod tests {
         }
         let path = r"\\?\HID#VID_248A&PID_5B2F\7&1&0&0000";
         assert_eq!(transport_for(path, 0x248A), Transport::Usb);
-        assert_eq!(transport_for_product(path, 0x248A, 0x5B2F), Transport::Usb24g);
+        assert_eq!(
+            transport_for_product(path, 0x248A, 0x5B2F),
+            Transport::Usb24g
+        );
         assert_eq!(transport_for_product(path, 0x248A, 0x5B2E), Transport::Usb);
         assert_eq!(
             transport_for_product(path, 0x3837, 0x100B),
@@ -1471,14 +1631,8 @@ mod tests {
             ..Default::default()
         };
 
-        let parsed = feature_set_get_caps(
-            &mut io,
-            &request,
-            65,
-            21,
-            std::time::Duration::ZERO,
-        )
-        .unwrap();
+        let parsed =
+            feature_set_get_caps(&mut io, &request, 65, 21, std::time::Duration::ZERO).unwrap();
 
         assert_eq!(io.set_calls.len(), 1);
         assert_eq!(io.set_calls[0].len(), 65);
@@ -1497,14 +1651,8 @@ mod tests {
             reply: Some(request.clone()),
             ..Default::default()
         };
-        let parsed = feature_set_get_caps(
-            &mut io,
-            &request,
-            21,
-            21,
-            std::time::Duration::ZERO,
-        )
-        .unwrap();
+        let parsed =
+            feature_set_get_caps(&mut io, &request, 21, 21, std::time::Duration::ZERO).unwrap();
         assert_eq!(io.set_calls[0].len(), 21);
         assert_eq!(io.get_calls, vec![(21, 0x11)]);
         assert_eq!(parsed, request);
@@ -1558,6 +1706,9 @@ mod tests {
     fn bthenum_paths_are_bluetooth_classic() {
         let path = r"\\?\HID#{00001124-0000-1000-8000-00805f9b34fb}_vid&000205cc_pid&0000\7&2e94cec3&0&0000";
         assert_eq!(transport_for(path, 0x046D), Transport::BluetoothClassic);
-        assert_eq!(transport_for(r"\\?\BTHENUM\DEV_001122334455\8&1", 0x046D), Transport::BluetoothClassic);
+        assert_eq!(
+            transport_for(r"\\?\BTHENUM\DEV_001122334455\8&1", 0x046D),
+            Transport::BluetoothClassic
+        );
     }
 }

@@ -3,8 +3,8 @@ use std::sync::OnceLock;
 use eframe::egui::{self, Color32, Pos2, Rect, Stroke, StrokeKind, vec2};
 use tray_icon::Icon;
 
-use anybattery_core::{BatteryStatus, DeviceKind};
 use crate::theme::{self, Palette};
+use anybattery_core::{BatteryStatus, DeviceKind};
 
 /// Same 16x16 map used by `build.rs` to generate the Windows icon resource.
 const ICON_SOURCE: &str = include_str!("../assets/anybattery-icon.pixels");
@@ -30,7 +30,11 @@ fn icon_grid() -> &'static [[IconPixel; ICON_SIZE]; ICON_SIZE] {
 fn parse_icon_grid() -> [[IconPixel; ICON_SIZE]; ICON_SIZE] {
     let mut grid = [[IconPixel::Transparent; ICON_SIZE]; ICON_SIZE];
     let mut rows = 0;
-    for (y, line) in ICON_SOURCE.lines().filter(|line| !line.trim().is_empty()).enumerate() {
+    for (y, line) in ICON_SOURCE
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .enumerate()
+    {
         assert!(y < ICON_SIZE, "icon map has more than {ICON_SIZE} rows");
         let mut columns = 0;
         for (x, ch) in line.chars().enumerate() {
@@ -46,7 +50,10 @@ fn parse_icon_grid() -> [[IconPixel; ICON_SIZE]; ICON_SIZE] {
             };
             columns += 1;
         }
-        assert_eq!(columns, ICON_SIZE, "icon map row {y} must have {ICON_SIZE} columns");
+        assert_eq!(
+            columns, ICON_SIZE,
+            "icon map row {y} must have {ICON_SIZE} columns"
+        );
         rows += 1;
     }
     assert_eq!(rows, ICON_SIZE, "icon map must have {ICON_SIZE} rows");
@@ -97,7 +104,11 @@ pub fn tray_icon(level: Option<u8>, charging: bool) -> Option<Icon> {
 pub fn window_icon() -> egui::IconData {
     let size = 128u32;
     let rgba = brand_rgba(size);
-    egui::IconData { rgba, width: size, height: size }
+    egui::IconData {
+        rgba,
+        width: size,
+        height: size,
+    }
 }
 
 /// Tray icon: the five-tier colour comes from the same helper the device cards use.
@@ -221,7 +232,13 @@ pub fn draw_device_icon(painter: &egui::Painter, rect: Rect, kind: DeviceKind, c
             block(-6.0, -3.0, 12.0, 1.0, Color32::TRANSPARENT);
             for row in 0..2 {
                 for col in 0..4 {
-                    block(-5.0 + col as f32 * 2.7, -2.0 + row as f32 * 2.2, 1.4, 1.2, color);
+                    block(
+                        -5.0 + col as f32 * 2.7,
+                        -2.0 + row as f32 * 2.2,
+                        1.4,
+                        1.2,
+                        color,
+                    );
                 }
             }
         }
@@ -277,7 +294,11 @@ pub fn status_dot_color(status: BatteryStatus, p: &crate::theme::Palette) -> Col
 }
 
 pub fn draw_pixel_shadow(painter: &egui::Painter, rect: Rect, color: Color32) {
-    painter.rect_filled(rect.translate(vec2(3.0, 3.0)), egui::CornerRadius::ZERO, color);
+    painter.rect_filled(
+        rect.translate(vec2(3.0, 3.0)),
+        egui::CornerRadius::ZERO,
+        color,
+    );
 }
 
 pub fn pixel_frame(painter: &egui::Painter, rect: Rect, fill: Color32, border: Color32) {
@@ -358,6 +379,10 @@ mod tests {
         // Charging keeps the 21-50 ochre tier instead of replacing it with green.
         let charging = battery_rgba(16, Some(50), true);
         assert_eq!(pixel(&charging, 16, 3, 5), [166, 132, 20, 255]);
-        assert_eq!(pixel(&charging, 16, 7, 4), ICON_BOLT, "charging bolt is drawn");
+        assert_eq!(
+            pixel(&charging, 16, 7, 4),
+            ICON_BOLT,
+            "charging bolt is drawn"
+        );
     }
 }

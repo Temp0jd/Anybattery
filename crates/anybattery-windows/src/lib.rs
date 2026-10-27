@@ -1,6 +1,8 @@
 //! Windows platform layer: device enumeration, battery providers, and vendor adapters.
 
 #[cfg(windows)]
+mod apple;
+#[cfg(windows)]
 mod bluetooth;
 #[cfg(windows)]
 mod extra;
@@ -16,4 +18,4 @@ mod vendor;
 mod xbox;
 
 #[cfg(windows)]
-pub use scan::{scan, ScanResult};
+pub use scan::{ScanResult, scan};

@@ -59,7 +59,10 @@ impl Settings {
     pub fn validate(&mut self) {
         self.poll_secs = self.poll_secs.clamp(MIN_POLL_SECS, MAX_POLL_SECS);
         self.low_threshold = self.low_threshold.clamp(1, 100);
-        self.critical_threshold = self.critical_threshold.min(self.low_threshold.saturating_sub(1)).max(1);
+        self.critical_threshold = self
+            .critical_threshold
+            .min(self.low_threshold.saturating_sub(1))
+            .max(1);
     }
 
     pub fn poll_interval(&self) -> std::time::Duration {
@@ -73,18 +76,28 @@ mod tests {
 
     #[test]
     fn clamps_poll_interval() {
-        let mut s = Settings { poll_secs: 1, ..Default::default() };
+        let mut s = Settings {
+            poll_secs: 1,
+            ..Default::default()
+        };
         s.validate();
         assert_eq!(s.poll_secs, MIN_POLL_SECS);
 
-        let mut s = Settings { poll_secs: 99_999, ..Default::default() };
+        let mut s = Settings {
+            poll_secs: 99_999,
+            ..Default::default()
+        };
         s.validate();
         assert_eq!(s.poll_secs, MAX_POLL_SECS);
     }
 
     #[test]
     fn keeps_thresholds_ordered() {
-        let mut s = Settings { low_threshold: 10, critical_threshold: 20, ..Default::default() };
+        let mut s = Settings {
+            low_threshold: 10,
+            critical_threshold: 20,
+            ..Default::default()
+        };
         s.validate();
         assert!(s.critical_threshold < s.low_threshold);
     }

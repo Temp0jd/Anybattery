@@ -63,17 +63,42 @@ impl DeviceKind {
     pub fn infer_from_name(name: &str) -> Self {
         let lower = name.to_lowercase();
         let has = |words: &[&str]| words.iter().any(|w| lower.contains(w));
-        if has(&["mouse", "鼠标", "viper", "deathadder", "basilisk", "naga", "orochi"]) {
+        if has(&[
+            "mouse",
+            "鼠标",
+            "viper",
+            "deathadder",
+            "basilisk",
+            "naga",
+            "orochi",
+        ]) {
             Self::Mouse
         } else if has(&["keyboard", "键盘", "blackwidow", "huntsman", "keychron"]) {
             Self::Keyboard
-        } else if has(&["headset", "耳机", "headphone", "barracuda", "blackshark", "wh-1000", "airpods"]) {
+        } else if has(&[
+            "headset",
+            "耳机",
+            "headphone",
+            "barracuda",
+            "blackshark",
+            "wh-1000",
+            "airpods",
+        ]) {
             Self::Headset
         } else if has(&["earbud", "buds", "耳塞", "airpods"]) {
             Self::Earbuds
         } else if has(&["speaker", "音箱", "soundbar"]) {
             Self::Speaker
-        } else if has(&["controller", "gamepad", "手柄", "xbox", "dualsense", "dualshock", "joy-con", "steam controller"]) {
+        } else if has(&[
+            "controller",
+            "gamepad",
+            "手柄",
+            "xbox",
+            "dualsense",
+            "dualshock",
+            "joy-con",
+            "steam controller",
+        ]) {
             Self::Controller
         } else if has(&["pen", "stylus", "触控笔"]) {
             Self::Pen
@@ -136,7 +161,10 @@ pub enum BatteryReading {
 
 impl BatteryReading {
     pub fn percent(level: u8, charging: Option<bool>) -> Self {
-        Self::Percent { level: level.min(100), charging }
+        Self::Percent {
+            level: level.min(100),
+            charging,
+        }
     }
 
     pub fn level_percent(self) -> Option<u8> {
@@ -222,7 +250,11 @@ pub struct BatterySource {
 }
 
 impl BatterySource {
-    pub fn new(provider: impl Into<String>, verification: Confidence, detail: impl Into<String>) -> Self {
+    pub fn new(
+        provider: impl Into<String>,
+        verification: Confidence,
+        detail: impl Into<String>,
+    ) -> Self {
         Self {
             provider: provider.into(),
             verification,
@@ -272,8 +304,14 @@ impl DeviceSnapshot {
     pub fn with_battery(mut self, reading: BatteryReading, now: u64) -> Self {
         self.battery = reading;
         self.status = match reading {
-            BatteryReading::Percent { level: 100, charging: Some(true) } => BatteryStatus::Full,
-            BatteryReading::Percent { charging: Some(true), .. } => BatteryStatus::Charging,
+            BatteryReading::Percent {
+                level: 100,
+                charging: Some(true),
+            } => BatteryStatus::Full,
+            BatteryReading::Percent {
+                charging: Some(true),
+                ..
+            } => BatteryStatus::Charging,
             BatteryReading::Percent { .. } => BatteryStatus::Available,
             BatteryReading::Coarse { .. } => BatteryStatus::Available,
             BatteryReading::Unknown => BatteryStatus::Unsupported,
@@ -338,8 +376,14 @@ mod tests {
     #[test]
     fn clamps_percent_and_infers_status() {
         let source = BatterySource::new("test", Confidence::Verified, "fixture");
-        let device = DeviceSnapshot::new(DeviceId::new("hid", "abc"), "Razer Viper", DeviceKind::Mouse, Transport::Usb24g, source)
-            .with_battery(BatteryReading::percent(120, Some(true)), 1_700_000_000);
+        let device = DeviceSnapshot::new(
+            DeviceId::new("hid", "abc"),
+            "Razer Viper",
+            DeviceKind::Mouse,
+            Transport::Usb24g,
+            source,
+        )
+        .with_battery(BatteryReading::percent(120, Some(true)), 1_700_000_000);
         assert_eq!(device.percent(), Some(100));
         assert_eq!(device.status, BatteryStatus::Full);
     }
@@ -354,8 +398,17 @@ mod tests {
 
     #[test]
     fn infers_device_kind() {
-        assert_eq!(DeviceKind::infer_from_name("Razer Viper V3 Pro"), DeviceKind::Mouse);
-        assert_eq!(DeviceKind::infer_from_name("Xbox Wireless Controller"), DeviceKind::Controller);
-        assert_eq!(DeviceKind::infer_from_name("Sony WH-1000XM5"), DeviceKind::Headset);
+        assert_eq!(
+            DeviceKind::infer_from_name("Razer Viper V3 Pro"),
+            DeviceKind::Mouse
+        );
+        assert_eq!(
+            DeviceKind::infer_from_name("Xbox Wireless Controller"),
+            DeviceKind::Controller
+        );
+        assert_eq!(
+            DeviceKind::infer_from_name("Sony WH-1000XM5"),
+            DeviceKind::Headset
+        );
     }
 }

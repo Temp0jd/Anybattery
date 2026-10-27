@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use crossbeam_channel::Sender;
+use std::sync::Arc;
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
@@ -11,7 +11,11 @@ pub struct TrayHandle {
     pub autostart: CheckMenuItem,
 }
 
-pub fn build(tx: Sender<UiCommand>, wake: Arc<dyn Fn() + Send + Sync>, autostart_checked: bool) -> Option<TrayHandle> {
+pub fn build(
+    tx: Sender<UiCommand>,
+    wake: Arc<dyn Fn() + Send + Sync>,
+    autostart_checked: bool,
+) -> Option<TrayHandle> {
     let show = MenuItem::with_id("show", "显示面板", true, None);
     let refresh = MenuItem::with_id("refresh", "立即刷新", true, None);
     let settings = MenuItem::with_id("settings", "设置", true, None);
@@ -69,5 +73,8 @@ pub fn build(tx: Sender<UiCommand>, wake: Arc<dyn Fn() + Send + Sync>, autostart
         .build()
         .ok()?;
 
-    Some(TrayHandle { icon: tray, autostart })
+    Some(TrayHandle {
+        icon: tray,
+        autostart,
+    })
 }
