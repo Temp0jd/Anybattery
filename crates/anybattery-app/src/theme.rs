@@ -24,6 +24,7 @@ pub struct Palette {
     pub text: Color32,
     pub secondary: Color32,
     pub tertiary: Color32,
+    pub on_accent: Color32,
     pub track: Color32,
     pub control: Color32,
     pub hover: Color32,
@@ -44,8 +45,9 @@ pub fn palette(dark: bool) -> Palette {
             card_solid: Color32::from_rgb(58, 54, 47),
             card_border: Color32::from_rgb(232, 226, 212),
             text: Color32::from_rgb(243, 238, 223),
-            secondary: Color32::from_rgb(184, 176, 158),
-            tertiary: Color32::from_rgb(132, 125, 110),
+            secondary: Color32::from_rgb(196, 188, 169),
+            tertiary: Color32::from_rgb(174, 166, 150),
+            on_accent: Color32::from_rgb(32, 24, 20),
             track: Color32::from_rgb(74, 69, 60),
             control: Color32::from_rgb(64, 60, 52),
             hover: Color32::from_rgb(78, 73, 64),
@@ -64,8 +66,9 @@ pub fn palette(dark: bool) -> Palette {
             card_solid: Color32::from_rgb(251, 247, 238),
             card_border: Color32::from_rgb(46, 43, 38),
             text: Color32::from_rgb(43, 40, 35),
-            secondary: Color32::from_rgb(111, 106, 94),
-            tertiary: Color32::from_rgb(154, 148, 134),
+            secondary: Color32::from_rgb(96, 91, 80),
+            tertiary: Color32::from_rgb(97, 92, 80),
+            on_accent: Color32::from_rgb(251, 247, 238),
             track: Color32::from_rgb(214, 207, 192),
             control: Color32::from_rgb(227, 220, 205),
             hover: Color32::from_rgb(239, 231, 216),
@@ -147,6 +150,7 @@ pub fn apply_visuals(ctx: &egui::Context, p: Palette, animations: bool) {
     visuals.extreme_bg_color = p.track;
     visuals.selection.bg_fill = p.accent;
     visuals.selection.stroke = Stroke::new(2.0, p.text);
+    visuals.hyperlink_color = p.accent;
     visuals.widgets.noninteractive.bg_fill = Color32::TRANSPARENT;
     visuals.widgets.noninteractive.bg_stroke = Stroke::NONE;
     visuals.widgets.noninteractive.corner_radius = CornerRadius::ZERO;
@@ -202,4 +206,64 @@ pub fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
         mix(a.b(), b.b()),
         mix(a.a(), b.a()),
     )
+}
+
+/// Snap a rectangle edge to a physical pixel so the pixel grid stays sharp at 125%/150% DPI.
+pub fn snap_rect(points_per_pixel: f32, mut rect: egui::Rect) -> egui::Rect {
+    if !(points_per_pixel.is_finite() && points_per_pixel > 0.0) {
+        return rect;
+    }
+    let snap = |v: f32| (v * points_per_pixel).round() / points_per_pixel;
+    rect.min.x = snap(rect.min.x);
+    rect.min.y = snap(rect.min.y);
+    rect.max.x = snap(rect.max.x);
+    rect.max.y = snap(rect.max.y);
+    rect
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn channel(v: f32) -> f32 {
+        let v = v / 255.0;
+        if v <= 0.039_28 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+    }
+
+    fn luminance(c: Color32) -> f32 {
+        0.2126 * channel(c.r() as f32) + 0.7152 * channel(c.g() as f32) + 0.0722 * channel(c.b() as f32)
+    }
+
+    fn contrast(a: Color32, b: Color32) -> f32 {
+        let (la, lb) = (luminance(a), luminance(b));
+        let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    #[test]
+    fn small_text_contrast_meets_4_5() {
+        for dark in [true, false] {
+            let p = palette(dark);
+            for (fg, bg) in [
+                (p.tertiary, p.card),
+                (p.tertiary, p.card_solid),
+                (p.tertiary, p.bg),
+                (p.secondary, p.card),
+                (p.on_accent, p.accent),
+            ] {
+                let ratio = contrast(fg, bg);
+                assert!(ratio >= 4.5, "contrast {:.2} below 4.5 (dark={})", ratio, dark);
+            }
+        }
+    }
+
+    #[test]
+    fn snap_rect_aligns_to_pixel_grid() {
+        let rect = egui::Rect::from_min_max(egui::pos2(10.3, 4.6), egui::pos2(100.2, 30.7));
+        let snapped = snap_rect(1.5, rect);
+        for v in [snapped.min.x, snapped.min.y, snapped.max.x, snapped.max.y] {
+            let physical = v * 1.5;
+            assert!((physical - physical.round()).abs() < 1e-3, "{} not on grid", v);
+        }
+    }
 }

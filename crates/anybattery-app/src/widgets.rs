@@ -1,15 +1,71 @@
 use eframe::egui::{
-    self, Align2, Color32, CornerRadius, FontId, Id, Pos2, Rect, Response, Sense, Stroke,
-    StrokeKind, Ui, vec2,
+    self, Align, Align2, Color32, CornerRadius, CursorIcon, FontFamily, FontId, Id, Layout, Pos2,
+    Rect, Response, RichText, Sense, Stroke, StrokeKind, Ui, UiBuilder, vec2,
 };
+use std::time::{Duration, Instant};
 
 use anybattery_core::{
-    age_text, BatteryReading, BatteryStatus, DeviceSnapshot, CoarseLevel,
+    age_text, BatteryReading, BatteryStatus, CoarseLevel, DeviceSnapshot,
 };
 use crate::icons;
 use crate::theme::{self, Palette};
 
 pub const CARD_HEIGHT: f32 = 78.0;
+
+/// Animations stay short: feedback, never decoration.
+const ANIMATION_SECS: f32 = 0.15;
+/// Refresh spinner step while scanning, and the repaint cadence that drives it.
+const SCAN_REPAINT_SECS: f32 = 0.2;
+
+/// Animation time used by this crate's custom transitions.
+/// Zero when the user turned animations off, so every value jumps straight to its target.
+fn animation_secs(ui: &Ui) -> f32 {
+    if ui.style().animation_time > 0.0 { ANIMATION_SECS } else { 0.0 }
+}
+
+/// Shortest text that still fits `max_width`, measured with the real font at `size`.
+///
+/// Used for every long label so fixed character counts can never let mixed CJK/Latin text
+/// spill into a neighbouring column.
+pub fn fit_text(ui: &Ui, value: &str, size: f32, bold: bool, max_width: f32) -> String {
+    let family = if bold { FontFamily::Name("bold".into()) } else { FontFamily::Proportional };
+    let font = FontId::new(size, family);
+    let width = |text: &str| {
+        ui.ctx().fonts_mut(|fonts| {
+            fonts
+                .layout_no_wrap(text.to_owned(), font.clone(), Color32::WHITE)
+                .size()
+                .x
+        })
+    };
+    if !max_width.is_finite() || max_width < 4.0 {
+        return String::new();
+    }
+    if width(value) <= max_width {
+        return value.to_owned();
+    }
+    let ellipsis = "…";
+    let budget = max_width - width(ellipsis);
+    let mut chars: Vec<char> = value.chars().collect();
+    while !chars.is_empty() && width(&chars.iter().collect::<String>()) > budget {
+        chars.pop();
+    }
+    let mut out: String = chars.into_iter().collect();
+    out.push_str(ellipsis);
+    out
+}
+
+/// Character-count shortening for non-layout strings (tray tooltips). Areas that must not
+/// overlap a neighbour use [`fit_text`], which measures the real font.
+pub fn truncate(value: &str, limit: usize) -> String {
+    if value.chars().count() <= limit {
+        value.to_owned()
+    } else {
+        let mut out: String = value.chars().take(limit.saturating_sub(1)).collect();
+        out.push('…');
+        out
+    }
+}
 
 pub fn section_title(ui: &mut Ui, p: &Palette, value: &str) {
     ui.add_space(2.0);
@@ -19,11 +75,14 @@ pub fn section_title(ui: &mut Ui, p: &Palette, value: &str) {
 
 pub fn device_card(ui: &mut Ui, p: &Palette, device: &DeviceSnapshot, now: u64) -> Response {
     let width = ui.available_width();
-    let (rect, response) = ui.allocate_exact_size(vec2(width, CARD_HEIGHT), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(vec2(width, CARD_HEIGHT), Sense::hover());
+    let rect = theme::snap_rect(ui.ctx().pixels_per_point(), rect);
+    let hover = ui.ctx().animate_bool(response.id, response.hovered());
     let painter = ui.painter();
 
     icons::draw_pixel_shadow(painter, rect, p.shadow);
-    icons::pixel_frame(painter, rect, p.card, p.card_border);
+    let fill = theme::lerp_color(p.card, p.hover, hover);
+    icons::pixel_frame(painter, rect, fill, p.card_border);
 
     let accent = icons::device_accent(device.kind);
     let tile = Rect::from_min_size(
@@ -39,23 +98,52 @@ pub fn device_card(ui: &mut Ui, p: &Palette, device: &DeviceSnapshot, now: u64) 
         accent,
     );
 
+    // Right column: the reading. Its width is measured once and shared by all rows.
+    let right = rect.right() - 12.0;
+    let reading_width = match device.battery {
+        BatteryReading::Percent { level, .. } => percent_text_width(ui, level).max(BAR_WIDTH),
+        BatteryReading::Coarse { level } => {
+            ui.painter()
+                .layout_no_wrap(
+                    level.label_zh().to_owned(),
+                    FontId::new(18.0, FontFamily::Name("bold".into())),
+                    p.secondary,
+                )
+                .size()
+                .x
+                .max(BAR_WIDTH)
+        }
+        BatteryReading::Unknown => BAR_WIDTH,
+    };
     let left = rect.left() + 52.0;
+    let text_width = (right - reading_width - 10.0 - left).max(16.0);
+
+    let title_font = FontId::new(12.0, FontFamily::Name("bold".into()));
     painter.text(
         Pos2::new(left, rect.top() + 26.0),
         Align2::LEFT_CENTER,
-        truncate(&device.name, 15),
-        FontId::new(12.0, egui::FontFamily::Name("bold".into())),
+        fit_text(ui, &device.name, 12.0, true, text_width),
+        title_font.clone(),
         p.text,
     );
+    // States that are easy to confuse with a plain reading get a small text tag that does not
+    // rely on colour alone.
+    if let Some(label) = status_badge(device.status) {
+        let font = FontId::new(10.0, FontFamily::Proportional);
+        let badge = Rect::from_min_size(Pos2::new(rect.left() + 10.0, rect.top() + 50.0), vec2(30.0, 14.0));
+        painter.rect_filled(badge, CornerRadius::ZERO, p.control);
+        painter.rect_stroke(badge, CornerRadius::ZERO, Stroke::new(1.0, p.card_border), StrokeKind::Inside);
+        painter.text(badge.center(), Align2::CENTER_CENTER, label, font, p.secondary);
+    }
     painter.text(
         Pos2::new(left, rect.top() + 48.0),
         Align2::LEFT_CENTER,
-        truncate(&device_detail(device, now), 24),
-        FontId::new(12.0, egui::FontFamily::Proportional),
+        fit_text(ui, &device_detail(device, now), 12.0, false, text_width),
+        FontId::new(12.0, FontFamily::Proportional),
         p.secondary,
     );
 
-    let right = rect.right() - 12.0;
+    // The percentage label is the true target value; only the cell fill eases.
     match device.battery {
         BatteryReading::Percent { level, charging } => {
             let color = theme::battery_color(*p, level, charging == Some(true));
@@ -63,47 +151,51 @@ pub fn device_card(ui: &mut Ui, p: &Palette, device: &DeviceSnapshot, now: u64) 
                 Pos2::new(right, rect.top() + 24.0),
                 Align2::RIGHT_CENTER,
                 format!("{}%", level),
-                FontId::new(24.0, egui::FontFamily::Name("bold".into())),
+                FontId::new(24.0, FontFamily::Name("bold".into())),
                 p.text,
             );
             let bar = Rect::from_min_size(
-                Pos2::new(right - 58.0, rect.top() + 48.0),
-                vec2(58.0, 12.0),
+                Pos2::new(right - BAR_WIDTH, rect.top() + 48.0),
+                vec2(BAR_WIDTH, 12.0),
             );
-            pixel_battery(painter, p, bar, level, color);
+            let target = level.min(100) as f32 / 100.0;
+            // Keyed by device, not list position, so sorting or filtering cannot hand one
+            // device's animation state to another.
+            let fill_id = Id::new(("device-percent-fill", device.id.0.as_str()));
+            let shown = ui.ctx().animate_value_with_time(
+                fill_id,
+                target,
+                animation_secs(ui),
+            );
+            pixel_battery(painter, p, bar, shown, color);
         }
         BatteryReading::Coarse { level } => {
             painter.text(
                 Pos2::new(right, rect.top() + 26.0),
                 Align2::RIGHT_CENTER,
                 level.label_zh(),
-                FontId::new(18.0, egui::FontFamily::Name("bold".into())),
+                FontId::new(18.0, FontFamily::Name("bold".into())),
                 p.secondary,
             );
             let bar = Rect::from_min_size(
-                Pos2::new(right - 58.0, rect.top() + 48.0),
-                vec2(58.0, 12.0),
+                Pos2::new(right - BAR_WIDTH, rect.top() + 48.0),
+                vec2(BAR_WIDTH, 12.0),
             );
-            let filled = match level {
-                CoarseLevel::Low => 1,
-                CoarseLevel::Medium => 2,
-                CoarseLevel::Full => 3,
-            };
-            coarse_pixel_battery(painter, p, bar, filled);
+            coarse_pixel_battery(painter, p, bar, level);
         }
         BatteryReading::Unknown => {
             painter.text(
                 Pos2::new(right, rect.top() + 26.0),
                 Align2::RIGHT_CENTER,
                 "---",
-                FontId::new(20.0, egui::FontFamily::Name("bold".into())),
+                FontId::new(20.0, FontFamily::Name("bold".into())),
                 p.tertiary,
             );
             painter.text(
                 Pos2::new(right, rect.top() + 50.0),
                 Align2::RIGHT_CENTER,
                 "NO DATA",
-                FontId::new(12.0, egui::FontFamily::Proportional),
+                FontId::new(12.0, FontFamily::Proportional),
                 p.tertiary,
             );
         }
@@ -113,6 +205,34 @@ pub fn device_card(ui: &mut Ui, p: &Palette, device: &DeviceSnapshot, now: u64) 
     response.on_hover_ui(move |ui| {
         device_tooltip(ui, p, &device, now);
     })
+}
+
+const BAR_WIDTH: f32 = 58.0;
+
+/// Width of the largest three-digit percentage at the reading size, so a 100% label
+/// never jumps the column wider while a device changes.
+fn percent_text_width(ui: &Ui, level: u8) -> f32 {
+    let sample = if level >= 100 { "100%" } else { "88%" };
+    ui.painter()
+        .layout_no_wrap(
+            sample.to_owned(),
+            FontId::new(24.0, FontFamily::Name("bold".into())),
+            Color32::WHITE,
+        )
+        .size()
+        .x
+        .ceil()
+}
+
+/// Non-colour status label for states a reader must be able to tell apart.
+fn status_badge(status: BatteryStatus) -> Option<&'static str> {
+    match status {
+        BatteryStatus::Asleep => Some("休眠"),
+        BatteryStatus::Stale => Some("过期"),
+        BatteryStatus::Error => Some("错误"),
+        BatteryStatus::Unsupported | BatteryStatus::Unknown => Some("未知"),
+        BatteryStatus::Available | BatteryStatus::Charging | BatteryStatus::Full => None,
+    }
 }
 
 fn device_tooltip(ui: &mut Ui, p: &Palette, device: &DeviceSnapshot, now: u64) {
@@ -149,7 +269,7 @@ fn device_tooltip(ui: &mut Ui, p: &Palette, device: &DeviceSnapshot, now: u64) {
     }
     if let Some(path) = &device.path {
         ui.add_space(3.0);
-        ui.label(theme::rich(truncate(path, 90), 12.0, p.tertiary, false));
+        ui.label(RichText::new(path).size(12.0).color(p.tertiary).monospace());
     }
 }
 
@@ -173,27 +293,36 @@ fn device_detail(device: &DeviceSnapshot, now: u64) -> String {
     }
 }
 
-fn pixel_battery(painter: &egui::Painter, p: &Palette, rect: Rect, level: u8, color: Color32) {
+fn pixel_battery(painter: &egui::Painter, p: &Palette, rect: Rect, fill: f32, color: Color32) {
     let cells = 8;
     let gap = 1.5;
     let cell_width = (rect.width() - gap * (cells as f32 - 1.0)) / cells as f32;
-    let filled = ((level.min(100) as f32 / 100.0) * cells as f32).ceil() as usize;
+    let filled = (fill.clamp(0.0, 1.0) * cells as f32).ceil() as usize;
     for i in 0..cells {
         let x = rect.left() + i as f32 * (cell_width + gap);
         let cell = Rect::from_min_size(Pos2::new(x, rect.top()), vec2(cell_width, rect.height()));
+        let cell = theme::snap_rect(painter.ctx().pixels_per_point(), cell);
         let fill = if i < filled { color } else { p.track };
         painter.rect_filled(cell, CornerRadius::ZERO, fill);
         painter.rect_stroke(cell, CornerRadius::ZERO, Stroke::new(1.0, p.card_border), StrokeKind::Inside);
     }
 }
 
-fn coarse_pixel_battery(painter: &egui::Painter, p: &Palette, rect: Rect, filled: usize) {
-    let cells = 4;
+/// Coarse reading: three segments meaning low / medium / full, matching the protocol's
+/// three levels exactly. No percentage is invented from them.
+fn coarse_pixel_battery(painter: &egui::Painter, p: &Palette, rect: Rect, level: CoarseLevel) {
+    let cells = 3;
     let gap = 2.0;
-    let cell_width = (rect.width() - gap * 3.0) / cells as f32;
+    let filled = match level {
+        CoarseLevel::Low => 1,
+        CoarseLevel::Medium => 2,
+        CoarseLevel::Full => 3,
+    };
+    let cell_width = (rect.width() - gap * (cells as f32 - 1.0)) / cells as f32;
     for i in 0..cells {
         let x = rect.left() + i as f32 * (cell_width + gap);
         let cell = Rect::from_min_size(Pos2::new(x, rect.top()), vec2(cell_width, rect.height()));
+        let cell = theme::snap_rect(painter.ctx().pixels_per_point(), cell);
         painter.rect_filled(
             cell,
             CornerRadius::ZERO,
@@ -211,34 +340,45 @@ pub enum SegmentResult {
 pub fn segment(ui: &mut Ui, p: &Palette, labels: &[&str], selected: usize) -> SegmentResult {
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(width, 32.0), Sense::hover());
+    let rect = theme::snap_rect(ui.ctx().pixels_per_point(), rect);
     let painter = ui.painter();
     icons::draw_pixel_shadow(painter, rect, p.shadow);
     icons::pixel_frame(painter, rect, p.control, p.card_border);
     let seg_width = (rect.width() - 4.0) / labels.len() as f32;
+    let marker_id = ui.id().with("segment-indicator");
+    let shown = ui.ctx().animate_value_with_time(marker_id, selected as f32, animation_secs(ui));
+    let marker = Rect::from_min_size(
+        Pos2::new(rect.left() + 2.0 + shown * seg_width, rect.top() + 2.0),
+        vec2(seg_width, rect.height() - 4.0),
+    );
+    painter.rect_filled(theme::snap_rect(ui.ctx().pixels_per_point(), marker), CornerRadius::ZERO, p.accent);
     let mut result = SegmentResult::None;
     for (index, label) in labels.iter().enumerate() {
         let seg = Rect::from_min_size(
             Pos2::new(rect.left() + 2.0 + index as f32 * seg_width, rect.top() + 2.0),
             vec2(seg_width, rect.height() - 4.0),
         );
-        if index == selected {
-            painter.rect_filled(seg, CornerRadius::ZERO, p.accent);
-        }
+        let response = ui.interact(seg, Id::new(("segment", label, index)), Sense::click());
+        let on_accent = index == selected;
+        let hover = if on_accent { 1.0 } else { ui.ctx().animate_bool(response.id.with("hover"), response.hovered()) };
         painter.text(
-            seg.center(),
+            theme::snap_rect(ui.ctx().pixels_per_point(), seg).center(),
             Align2::CENTER_CENTER,
             *label,
             FontId::new(
                 12.0,
-                if index == selected {
-                    egui::FontFamily::Name("bold".into())
+                if on_accent {
+                    FontFamily::Name("bold".into())
                 } else {
-                    egui::FontFamily::Proportional
+                    FontFamily::Proportional
                 },
             ),
-            if index == selected { p.card_solid } else { p.secondary },
+            if on_accent {
+                p.on_accent
+            } else {
+                theme::lerp_color(p.secondary, p.text, hover)
+            },
         );
-        let response = ui.interact(seg, Id::new(("segment", label, index)), Sense::click());
         if response.clicked() && index != selected {
             result = SegmentResult::Selected(index);
         }
@@ -250,18 +390,67 @@ pub fn segment(ui: &mut Ui, p: &Palette, labels: &[&str], selected: usize) -> Se
 pub enum Glyph {
     Refresh,
     Settings,
-    Diagnostics,
     Back,
-    Copy,
 }
 
 pub fn icon_button(ui: &mut Ui, p: &Palette, glyph: Glyph, tooltip: &str) -> Response {
     let (rect, response) = ui.allocate_exact_size(vec2(30.0, 28.0), Sense::click());
-    if response.hovered() {
-        icons::pixel_frame(ui.painter(), rect, p.hover, p.card_border);
+    let rect = theme::snap_rect(ui.ctx().pixels_per_point(), rect);
+    let hover = ui.ctx().animate_bool(response.id, response.hovered());
+    if hover > 0.0 {
+        icons::pixel_frame(ui.painter(), rect, p.hover.gamma_multiply(hover), p.card_border);
     }
-    draw_glyph(ui.painter(), rect, glyph, if response.hovered() { p.text } else { p.secondary });
+    draw_glyph(
+        ui.painter(),
+        rect,
+        glyph,
+        theme::lerp_color(p.secondary, p.text, hover.max(if response.is_pointer_button_down_on() { 1.0 } else { 0.0 })),
+    );
     response.on_hover_text(tooltip)
+}
+
+/// Refresh control: the glyph steps while a scan is running and settles as soon as it stops.
+pub fn refresh_button(ui: &mut Ui, p: &Palette, scanning: bool, animations: bool) -> Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(30.0, 28.0), Sense::click());
+    let rect = theme::snap_rect(ui.ctx().pixels_per_point(), rect);
+    let hover = ui.ctx().animate_bool(response.id.with("hover"), response.hovered());
+    if hover > 0.0 {
+        icons::pixel_frame(ui.painter(), rect, p.hover.gamma_multiply(hover), p.card_border);
+    }
+    let color = if scanning { p.accent } else { theme::lerp_color(p.secondary, p.text, hover) };
+    let painter = ui.painter();
+    if scanning {
+        // Four-step rotation around the frame; one step per 200 ms, so idle cost is bounded
+        // and disabling animations drops straight to the static glyph.
+        let step = if animations {
+            let t = ui.input(|i| i.time);
+            let step = ((t / SCAN_REPAINT_SECS as f64) as i64).rem_euclid(4);
+            ui.ctx().request_repaint_after(Duration::from_secs_f32(SCAN_REPAINT_SECS));
+            step
+        } else {
+            0
+        };
+        let c = rect.center();
+        let r = 5.0;
+        let corners = [
+            Pos2::new(c.x - r, c.y - r),
+            Pos2::new(c.x + r, c.y - r),
+            Pos2::new(c.x + r, c.y + r),
+            Pos2::new(c.x - r, c.y + r),
+        ];
+        let start = corners[step as usize];
+        let mid = corners[((step + 1) % 4) as usize];
+        painter.line_segment([start, mid], Stroke::new(2.0, color));
+        painter.line_segment(
+            [start, corners[((step + 3) % 4) as usize]],
+            Stroke::new(2.0, color.gamma_multiply(0.45)),
+        );
+    } else {
+        draw_glyph(painter, rect, Glyph::Refresh, color);
+    }
+    response
+        .on_hover_text(if scanning { "正在扫描…" } else { "立即刷新" })
+        .on_hover_cursor(CursorIcon::PointingHand)
 }
 
 fn draw_glyph(painter: &egui::Painter, rect: Rect, glyph: Glyph, color: Color32) {
@@ -286,36 +475,16 @@ fn draw_glyph(painter: &egui::Painter, rect: Rect, glyph: Glyph, color: Color32)
                 );
             }
         }
-        Glyph::Diagnostics => {
-            let points = vec![
-                Pos2::new(c.x - 8.0, c.y),
-                Pos2::new(c.x - 4.0, c.y),
-                Pos2::new(c.x - 2.0, c.y - 5.0),
-                Pos2::new(c.x + 1.0, c.y + 5.0),
-                Pos2::new(c.x + 4.0, c.y),
-                Pos2::new(c.x + 8.0, c.y),
-            ];
-            painter.add(egui::Shape::line(points, stroke));
-        }
         Glyph::Back => {
             painter.line_segment([Pos2::new(c.x - 2.0, c.y - 6.0), Pos2::new(c.x - 8.0, c.y)], stroke);
             painter.line_segment([Pos2::new(c.x - 8.0, c.y), Pos2::new(c.x - 2.0, c.y + 6.0)], stroke);
-        }
-        Glyph::Copy => {
-            painter.rect_stroke(
-                Rect::from_center_size(Pos2::new(c.x - 2.0, c.y + 2.0), vec2(9.0, 10.0)),
-                CornerRadius::ZERO,
-                Stroke::new(2.0, color),
-                StrokeKind::Middle,
-            );
-            painter.line_segment([Pos2::new(c.x - 3.0, c.y - 4.0), Pos2::new(c.x + 5.0, c.y - 4.0)], stroke);
-            painter.line_segment([Pos2::new(c.x + 5.0, c.y - 4.0), Pos2::new(c.x + 5.0, c.y + 1.0)], stroke);
         }
     }
 }
 
 pub fn toggle(ui: &mut Ui, p: &Palette, value: &mut bool) -> bool {
     let (rect, response) = ui.allocate_exact_size(vec2(44.0, 24.0), Sense::click());
+    let rect = theme::snap_rect(ui.ctx().pixels_per_point(), rect);
     if response.clicked() {
         *value = !*value;
     }
@@ -326,38 +495,41 @@ pub fn toggle(ui: &mut Ui, p: &Palette, value: &mut bool) -> bool {
         Pos2::new(rect.left() + 3.0 + t * (rect.width() - 22.0), rect.top() + 3.0),
         vec2(16.0, 16.0),
     );
-    ui.painter().rect_filled(knob, CornerRadius::ZERO, p.card_solid);
+    ui.painter().rect_filled(theme::snap_rect(ui.ctx().pixels_per_point(), knob), CornerRadius::ZERO, p.card_solid);
     ui.painter().rect_stroke(knob, CornerRadius::ZERO, Stroke::new(2.0, p.card_border), StrokeKind::Inside);
-    response.clicked()
+    response.on_hover_cursor(CursorIcon::PointingHand).clicked()
 }
 
 pub fn settings_row(ui: &mut Ui, p: &Palette, title: &str, detail: &str, control: impl FnOnce(&mut Ui)) {
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(width, 52.0), Sense::hover());
+    // Control column is reserved first; the text column gets whatever is left.
+    let control_width = 120.0;
+    let text_width = (rect.width() - 12.0 - control_width - 10.0).max(40.0);
     let painter = ui.painter();
     painter.text(
         Pos2::new(rect.left() + 12.0, rect.top() + 18.0),
         Align2::LEFT_CENTER,
-        title,
-        FontId::new(12.0, egui::FontFamily::Proportional),
+        fit_text(ui, title, 12.0, false, text_width),
+        FontId::new(12.0, FontFamily::Proportional),
         p.text,
     );
     if !detail.is_empty() {
         painter.text(
             Pos2::new(rect.left() + 12.0, rect.top() + 36.0),
             Align2::LEFT_CENTER,
-            truncate(detail, 30),
-            FontId::new(12.0, egui::FontFamily::Proportional),
+            fit_text(ui, detail, 12.0, false, text_width),
+            FontId::new(12.0, FontFamily::Proportional),
             p.tertiary,
         );
     }
     let mut child = ui.new_child(
-        egui::UiBuilder::new()
+        UiBuilder::new()
             .max_rect(Rect::from_min_max(
-                Pos2::new(rect.right() - 120.0, rect.top() + 14.0),
+                Pos2::new(rect.right() - control_width, rect.top() + 14.0),
                 Pos2::new(rect.right() - 8.0, rect.bottom() - 14.0),
             ))
-            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+            .layout(Layout::right_to_left(Align::Center)),
     );
     control(&mut child);
 }
@@ -376,7 +548,7 @@ pub fn group(ui: &mut Ui, p: &Palette, add: impl FnOnce(&mut Ui)) {
 
 pub fn pill_button(ui: &mut Ui, p: &Palette, text: &str, selected: bool) -> Response {
     let fill = if selected { p.accent } else { p.control };
-    let color = if selected { p.card_solid } else { p.text };
+    let color = if selected { p.on_accent } else { p.text };
     ui.add(
         egui::Button::new(theme::rich(text, 12.0, color, selected))
             .fill(fill)
@@ -384,20 +556,17 @@ pub fn pill_button(ui: &mut Ui, p: &Palette, text: &str, selected: bool) -> Resp
             .corner_radius(CornerRadius::ZERO)
             .min_size(vec2(0.0, 28.0)),
     )
+    .on_hover_cursor(CursorIcon::PointingHand)
 }
 
-pub fn truncate(value: &str, limit: usize) -> String {
-    let count = value.chars().count();
-    if count <= limit {
-        value.to_owned()
-    } else {
-        let mut out: String = value.chars().take(limit.saturating_sub(1)).collect();
-        out.push('…');
-        out
-    }
-}
-
-pub fn footer(ui: &mut Ui, p: &Palette, poll_secs: u64, last_scan: Option<std::time::Instant>, scanning: bool) -> Response {
+/// Footer: one natural-reading line for the interval and the freshness of the last scan.
+pub fn footer(
+    ui: &mut Ui,
+    p: &Palette,
+    poll_secs: u64,
+    last_scan: Option<Instant>,
+    scanning: bool,
+) -> Response {
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(width, 44.0), Sense::hover());
     let painter = ui.painter();
@@ -405,44 +574,92 @@ pub fn footer(ui: &mut Ui, p: &Palette, poll_secs: u64, last_scan: Option<std::t
         [Pos2::new(rect.left(), rect.top() + 1.0), Pos2::new(rect.right(), rect.top() + 1.0)],
         Stroke::new(2.0, p.card_border),
     );
-    let age = last_scan
-        .map(|instant| {
-            let secs = instant.elapsed().as_secs();
-            if scanning {
-                "SCANNING".to_owned()
-            } else if secs < 5 {
-                "刚刚刷新".to_owned()
-            } else if secs < 60 {
-                format!("{} 秒前", secs)
-            } else {
-                format!("{} 分钟前", secs / 60)
-            }
-        })
-        .unwrap_or_else(|| "等待首次扫描".to_owned());
+    let text_width = (rect.width() - 82.0).max(40.0);
     painter.text(
-        Pos2::new(rect.left() + 2.0, rect.center().y),
+        Pos2::new(rect.left() + 2.0, rect.top() + 13.0),
         Align2::LEFT_CENTER,
-        format!("每 {} 秒 / {}", poll_secs, age),
-        FontId::new(12.0, egui::FontFamily::Proportional),
+        fit_text(ui, &format!("每 {}", interval_text(poll_secs)), 12.0, false, text_width),
+        FontId::new(12.0, FontFamily::Proportional),
         p.tertiary,
+    );
+    painter.text(
+        Pos2::new(rect.left() + 2.0, rect.top() + 31.0),
+        Align2::LEFT_CENTER,
+        fit_text(ui, &scan_age_text(last_scan, scanning), 12.0, false, text_width),
+        FontId::new(12.0, FontFamily::Proportional),
+        if scanning { p.text } else { p.tertiary },
     );
     let button_rect = Rect::from_min_size(
         Pos2::new(rect.right() - 62.0, rect.center().y - 13.0),
         vec2(62.0, 26.0),
     );
     let response = ui.interact(button_rect, Id::new("footer.diagnostics"), Sense::click());
+    let hover = ui.ctx().animate_bool(response.id.with("hover"), response.hovered());
     icons::pixel_frame(
         painter,
         button_rect,
-        if response.hovered() { p.hover } else { p.control },
+        theme::lerp_color(p.control, p.hover, hover),
         p.card_border,
     );
     painter.text(
         button_rect.center(),
         Align2::CENTER_CENTER,
         "诊断",
-        FontId::new(12.0, egui::FontFamily::Proportional),
+        FontId::new(12.0, FontFamily::Proportional),
         p.secondary,
     );
-    response
+    response.on_hover_cursor(CursorIcon::PointingHand)
+}
+
+/// Interval in natural Chinese: "30 秒", "1 分钟", "1 分 30 秒", "30 分钟", "1 小时".
+pub fn interval_text(seconds: u64) -> String {
+    if seconds < 60 {
+        format!("{} 秒", seconds)
+    } else if seconds < 3600 {
+        let minutes = seconds / 60;
+        let rest = seconds % 60;
+        if rest == 0 {
+            format!("{} 分钟", minutes)
+        } else {
+            format!("{} 分 {} 秒", minutes, rest)
+        }
+    } else {
+        format!("{} 小时", seconds / 3600)
+    }
+}
+
+fn scan_age_text(last_scan: Option<Instant>, scanning: bool) -> String {
+    if scanning {
+        return "正在扫描…".to_owned();
+    }
+    match last_scan.map(|instant| instant.elapsed().as_secs()) {
+        None => "等待首次扫描".to_owned(),
+        Some(secs) if secs < 5 => "刚刚刷新".to_owned(),
+        Some(secs) if secs < 60 => format!("{} 秒前刷新", secs),
+        Some(secs) if secs < 3600 => format!("{} 分钟前刷新", secs / 60),
+        Some(secs) => format!("{} 小时前刷新", secs / 3600),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interval_text_reads_naturally() {
+        assert_eq!(interval_text(15), "15 秒");
+        assert_eq!(interval_text(30), "30 秒");
+        assert_eq!(interval_text(60), "1 分钟");
+        assert_eq!(interval_text(90), "1 分 30 秒");
+        assert_eq!(interval_text(300), "5 分钟");
+        assert_eq!(interval_text(1800), "30 分钟");
+        assert_eq!(interval_text(3600), "1 小时");
+    }
+
+    #[test]
+    fn scan_age_distinguishes_scanning_and_fresh() {
+        assert_eq!(scan_age_text(None, false), "等待首次扫描");
+        assert_eq!(scan_age_text(None, true), "正在扫描…");
+        assert_eq!(scan_age_text(Some(Instant::now()), false), "刚刚刷新");
+    }
 }

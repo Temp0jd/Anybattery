@@ -7,27 +7,23 @@ use eframe::egui::{
 };
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-
 use crate::icons;
 use crate::storage;
 use crate::theme::{self, Palette};
 use crate::tray::TrayHandle;
 use crate::widgets;
-
 pub enum UiCommand {
     Toggle,
     Show,
     Refresh,
     Menu(String),
 }
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     Devices,
     Settings,
     Diagnostics,
 }
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Filter {
     All,
@@ -35,7 +31,6 @@ pub enum Filter {
     Wireless,
     Controllers,
 }
-
 impl Filter {
     fn index(self) -> usize {
         match self {
@@ -45,7 +40,6 @@ impl Filter {
             Self::Controllers => 3,
         }
     }
-
     fn from_index(index: usize) -> Self {
         match index {
             1 => Self::Bluetooth,
@@ -54,7 +48,6 @@ impl Filter {
             _ => Self::All,
         }
     }
-
     fn matches(self, device: &DeviceSnapshot) -> bool {
         match self {
             Self::All => true,
@@ -64,12 +57,10 @@ impl Filter {
         }
     }
 }
-
 struct DeviceService {
     requests: Sender<Settings>,
     results: Receiver<ScanResult>,
 }
-
 impl DeviceService {
     fn start() -> Self {
         let (requests, request_rx) = unbounded::<Settings>();
@@ -88,7 +79,6 @@ impl DeviceService {
         Self { requests, results }
     }
 }
-
 pub struct AnyBatteryApp {
     settings: Settings,
     devices: Vec<DeviceSnapshot>,
@@ -96,6 +86,11 @@ pub struct AnyBatteryApp {
     page: Page,
     filter: Filter,
     scanning: bool,
+    /// A scan was requested while another one was running; run exactly one more when it ends.
+    rescan_pending: bool,
+    /// True while the refresh-interval slider is being dragged, so the config is written once
+    /// at the end of the gesture instead of on every pixel.
+    poll_dragging: bool,
     last_scan: Option<Instant>,
     service: DeviceService,
     commands: Receiver<UiCommand>,
@@ -103,6 +98,7 @@ pub struct AnyBatteryApp {
     dark: bool,
     applied_dark: Option<bool>,
     applied_animations: Option<bool>,
+    animations: bool,
     last_theme_check: Instant,
     hidden: bool,
     quitting: bool,
@@ -110,7 +106,6 @@ pub struct AnyBatteryApp {
     counts: (usize, usize, usize),
     alert: Option<String>,
 }
-
 impl AnyBatteryApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
@@ -126,45 +121,67 @@ impl AnyBatteryApp {
         if let Some(tray) = &tray {
             tray.autostart.set_checked(settings.autostart);
         }
+        let animations = settings.animations;
         let service = DeviceService::start();
-        let _ = service.requests.send(settings.clone());
-        Self {
+        let mut app = Self {
             settings,
             devices: Vec::new(),
             diagnostics: vec!["正在扫描设备…".to_owned()],
             page: Page::Devices,
             filter: Filter::All,
             scanning: true,
+            rescan_pending: false,
+            poll_dragging: false,
             last_scan: None,
             service,
             commands,
             tray,
             dark,
             applied_dark: Some(dark),
-            applied_animations: Some(true),
+            applied_animations: Some(animations),
+            animations,
             last_theme_check: Instant::now(),
             hidden: false,
             quitting: false,
             toast: None,
             counts: (0, 0, 0),
             alert: None,
+        };
+        // The initial scan request is the first thing the worker thread receives.
+        if app.service.requests.send(app.settings.clone()).is_err() {
+            app.scanning = false;
+            app.diagnostics = vec!["扫描线程未能启动".to_owned()];
         }
+        app.update_tray();
+        app
     }
-
+    /// Start a scan right now. While one is running the request is recorded, so at most one
+    /// follow-up scan runs after it — never two scans at once, never a scan loop.
     fn request_scan(&mut self) {
         if self.scanning {
+            self.rescan_pending = true;
             return;
         }
-        self.scanning = true;
-        if self.service.requests.send(self.settings.clone()).is_err() {
-            self.scanning = false;
-            self.toast("扫描线程已停止".to_owned());
+        self.start_scan();
+    }
+    fn start_scan(&mut self) {
+        match self.service.requests.send(self.settings.clone()) {
+            Ok(()) => self.scanning = true,
+            Err(_) => {
+                self.scanning = false;
+                self.rescan_pending = false;
+                self.toast("扫描线程已停止".to_owned());
+            }
         }
     }
-
     fn poll_results(&mut self, ctx: &egui::Context) {
         while let Ok(result) = self.service.results.try_recv() {
             self.scanning = false;
+            // Apply changes made during the scan once, with the settings that are current now.
+            if self.rescan_pending {
+                self.rescan_pending = false;
+                self.start_scan();
+            }
             self.last_scan = Some(Instant::now());
             self.devices = result.devices;
             let mut diagnostics = Vec::with_capacity(result.diagnostics.len() + 2);
@@ -181,7 +198,6 @@ impl AnyBatteryApp {
             ctx.request_repaint();
         }
     }
-
     fn update_counts(&mut self) {
         let mut bluetooth = 0;
         let mut wireless = 0;
@@ -207,7 +223,6 @@ impl AnyBatteryApp {
             .min_by_key(|(level, _)| *level)
             .map(|(level, device)| format!("{} 电量低（{}%），建议充电", device.name, level));
     }
-
     fn update_tray(&mut self) {
         let Some(tray) = &self.tray else {
             return;
@@ -228,17 +243,21 @@ impl AnyBatteryApp {
             None => format!("AnyBattery · {} 台设备", self.devices.len()),
         };
         let _ = tray.icon.set_tooltip(Some(tooltip));
-        if let Some(device) = lowest {
-            if let Some(icon) = icons::tray_icon(device.percent(), device.battery.charging() == Some(true)) {
-                let _ = tray.icon.set_icon(Some(icon));
-            }
+        // Without a live percentage device there is no level to show: fall back to the
+        // "no data" icon instead of leaving a stale previous reading in the tray.
+        let (level, charging) = match lowest {
+            Some(device) => (device.percent(), device.battery.charging() == Some(true)),
+            None => (None, false),
+        };
+        if let Some(icon) = icons::tray_icon(level, charging) {
+            let _ = tray.icon.set_icon(Some(icon));
         }
     }
-
     fn toast(&mut self, message: String) {
         self.toast = Some((message, Instant::now()));
     }
-
+    /// Persist settings. Theme and animation switches are pushed by `maybe_refresh_theme`
+    /// through their own `applied_*` tracking, so saving here never forces a theme reapply.
     fn save_settings(&mut self) {
         if !storage::save(&self.settings) {
             self.toast(format!("无法保存设置到 {}", storage::data_dir().display()));
@@ -246,9 +265,7 @@ impl AnyBatteryApp {
         if let Some(tray) = &self.tray {
             tray.autostart.set_checked(self.settings.autostart);
         }
-        self.applied_dark = None;
     }
-
     fn process_commands(&mut self, ctx: &egui::Context) {
         while let Ok(command) = self.commands.try_recv() {
             match command {
@@ -276,11 +293,7 @@ impl AnyBatteryApp {
                         self.show(ctx);
                     }
                     "autostart" => {
-                        self.settings.autostart = !self.settings.autostart;
-                        if !system::set_autostart(self.settings.autostart) {
-                            self.settings.autostart = !self.settings.autostart;
-                            self.toast("无法修改开机自启（注册表被拒绝）".to_owned());
-                        }
+                        self.apply_autostart(!self.settings.autostart);
                         self.save_settings();
                     }
                     "quit" => {
@@ -292,19 +305,27 @@ impl AnyBatteryApp {
             }
         }
     }
-
+    /// Change the autostart setting only if the registry accepted the change, so the stored
+    /// value always matches the real registry state and the tray check item.
+    fn apply_autostart(&mut self, enabled: bool) -> bool {
+        if system::set_autostart(enabled) {
+            self.settings.autostart = enabled;
+            true
+        } else {
+            self.toast("无法修改开机自启（注册表被拒绝）".to_owned());
+            false
+        }
+    }
     fn show(&mut self, ctx: &egui::Context) {
         self.hidden = false;
         ctx.send_viewport_cmd(ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(ViewportCommand::Focus);
         ctx.request_repaint();
     }
-
     fn hide(&mut self, ctx: &egui::Context) {
         self.hidden = true;
         ctx.send_viewport_cmd(ViewportCommand::Visible(false));
     }
-
     fn maybe_auto_scan(&mut self) {
         if self.scanning {
             return;
@@ -314,10 +335,9 @@ impl AnyBatteryApp {
             .map(|last| last.elapsed() >= self.settings.poll_interval())
             .unwrap_or(true);
         if due {
-            self.request_scan();
+            self.start_scan();
         }
     }
-
     fn maybe_refresh_theme(&mut self, ctx: &egui::Context) {
         let mut dark = self.dark;
         if self.settings.theme == Theme::System && self.last_theme_check.elapsed() > Duration::from_secs(2) {
@@ -328,6 +348,7 @@ impl AnyBatteryApp {
             self.dark = dark;
             self.applied_dark = Some(dark);
             self.applied_animations = Some(self.settings.animations);
+            self.animations = self.settings.animations;
             theme::apply_visuals(ctx, theme::palette(dark), self.settings.animations);
             ctx.send_viewport_cmd(ViewportCommand::SetTheme(if dark {
                 egui::SystemTheme::Dark
@@ -336,7 +357,6 @@ impl AnyBatteryApp {
             }));
         }
     }
-
     fn paint_background(&self, ui: &mut Ui, p: &Palette) {
         let rect = ui.max_rect();
         let painter = ui.painter();
@@ -360,62 +380,78 @@ impl AnyBatteryApp {
             StrokeKind::Inside,
         );
     }
-
     fn header(&mut self, ui: &mut Ui, p: &Palette) {
         let width = ui.available_width();
-        let (bar, _) = ui.allocate_exact_size(vec2(width, 34.0), Sense::hover());
+        let (bar, _) = ui.allocate_exact_size(vec2(width, 50.0), Sense::hover());
         let mut right = ui.new_child(
             UiBuilder::new()
                 .max_rect(Rect::from_min_size(
-                    Pos2::new(bar.right() - 78.0, bar.top()),
-                    vec2(78.0, bar.height()),
+                    Pos2::new(bar.right() - 70.0, bar.top() + 11.0),
+                    vec2(70.0, 28.0),
                 ))
                 .layout(Layout::right_to_left(Align::Center)),
         );
         if widgets::icon_button(&mut right, p, widgets::Glyph::Settings, "设置").clicked() {
             self.page = if self.page == Page::Settings { Page::Devices } else { Page::Settings };
         }
-        if widgets::icon_button(&mut right, p, widgets::Glyph::Refresh, "立即刷新").clicked() {
+        let scanning = self.scanning;
+        if widgets::refresh_button(&mut right, p, scanning, self.animations).clicked() && !scanning {
             self.request_scan();
         }
 
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            if self.page != Page::Devices
-                && widgets::icon_button(ui, p, widgets::Glyph::Back, "返回").clicked()
-            {
+        let mut title_left = bar.left();
+        if self.page != Page::Devices {
+            let back_rect =
+                Rect::from_min_size(Pos2::new(bar.left(), bar.top() + 11.0), vec2(30.0, 28.0));
+            let mut back = ui.new_child(
+                UiBuilder::new()
+                    .max_rect(back_rect)
+                    .layout(Layout::left_to_right(Align::Center)),
+            );
+            if widgets::icon_button(&mut back, p, widgets::Glyph::Back, "返回").clicked() {
                 self.page = Page::Devices;
             }
-            let (title, subtitle) = match self.page {
-                Page::Devices => (
-                    "电池".to_owned(),
-                    if self.devices.is_empty() {
-                        if self.scanning {
-                            "正在扫描设备…".to_owned()
-                        } else {
-                            "未发现带电池的设备".to_owned()
-                        }
+            title_left += 36.0;
+        }
+        let (title, subtitle) = match self.page {
+            Page::Devices => (
+                "电池".to_owned(),
+                if self.devices.is_empty() {
+                    if self.scanning {
+                        "正在扫描设备…".to_owned()
                     } else {
-                        format!(
-                            "{} 台设备 · 蓝牙 {} · 2.4G {} · 手柄 {}",
-                            self.devices.len(),
-                            self.counts.0,
-                            self.counts.1,
-                            self.counts.2
-                        )
-                    },
-                ),
-                Page::Settings => ("设置".to_owned(), "刷新、通知与外观".to_owned()),
-                Page::Diagnostics => ("诊断".to_owned(), "扫描结果与设备接口".to_owned()),
-            };
-            ui.vertical(|ui| {
-                ui.label(theme::rich(title, 24.0, p.text, true));
-                ui.add_space(1.0);
-                ui.label(theme::rich(subtitle, 12.0, p.secondary, false));
-            });
-        });
+                        "蓝牙与 2.4G 接收器".to_owned()
+                    }
+                } else {
+                    format!(
+                        "{} 台设备 · 蓝牙 {} · 2.4G {} · 手柄 {}",
+                        self.devices.len(),
+                        self.counts.0,
+                        self.counts.1,
+                        self.counts.2
+                    )
+                },
+            ),
+            Page::Settings => ("设置".to_owned(), "刷新、通知与外观".to_owned()),
+            Page::Diagnostics => ("诊断".to_owned(), "扫描结果与设备接口".to_owned()),
+        };
+        let title_width = (bar.right() - 78.0 - title_left).max(40.0);
+        let painter = ui.painter();
+        painter.text(
+            Pos2::new(title_left, bar.top() + 15.0),
+            Align2::LEFT_CENTER,
+            widgets::fit_text(ui, &title, 22.0, true, title_width),
+            FontId::new(22.0, egui::FontFamily::Name("bold".into())),
+            p.text,
+        );
+        painter.text(
+            Pos2::new(title_left, bar.top() + 35.0),
+            Align2::LEFT_CENTER,
+            widgets::fit_text(ui, &subtitle, 11.0, false, title_width),
+            FontId::new(11.0, egui::FontFamily::Proportional),
+            p.secondary,
+        );
     }
-
     fn devices_page(&mut self, ui: &mut Ui, p: &Palette) {
         ui.add_space(8.0);
         if self.settings.notify_low_battery {
@@ -432,7 +468,7 @@ impl AnyBatteryApp {
                 ui.painter().text(
                     Pos2::new(rect.left() + 28.0, rect.center().y),
                     Align2::LEFT_CENTER,
-                    widgets::truncate(alert, 40),
+                    widgets::fit_text(ui, alert, 12.0, false, ui.available_width() - 36.0),
                     FontId::new(12.0, egui::FontFamily::Proportional),
                     p.orange,
                 );
@@ -447,6 +483,7 @@ impl AnyBatteryApp {
         }
         ui.add_space(10.0);
         let list_height = (ui.available_height() - 50.0).max(80.0);
+        let mut show_all = false;
         egui::ScrollArea::vertical()
             .max_height(list_height)
             .auto_shrink([false, false])
@@ -459,7 +496,18 @@ impl AnyBatteryApp {
                     .filter(|device| self.filter.matches(device))
                     .collect();
                 if filtered.is_empty() {
-                    empty_state(ui, p, self.scanning);
+                    // Three distinct situations: a scan in flight, nothing found at all, or
+                    // only the current filter came up empty.
+                    let empty = if self.scanning {
+                        EmptyState::Scanning
+                    } else if self.devices.is_empty() {
+                        EmptyState::NoDevices
+                    } else {
+                        EmptyState::Filtered
+                    };
+                    if empty_state(ui, p, empty) {
+                        show_all = true;
+                    }
                 } else {
                     for device in filtered {
                         widgets::device_card(ui, p, device, now);
@@ -468,12 +516,14 @@ impl AnyBatteryApp {
                 }
                 ui.add_space(4.0);
             });
+        if show_all {
+            self.filter = Filter::All;
+        }
         ui.add_space(2.0);
         if widgets::footer(ui, p, self.settings.poll_secs, self.last_scan, self.scanning).clicked() {
             self.page = Page::Diagnostics;
         }
     }
-
     fn settings_page(&mut self, ui: &mut Ui, p: &Palette) {
         let available = ui.available_height() - 12.0;
         egui::ScrollArea::vertical()
@@ -491,7 +541,7 @@ impl AnyBatteryApp {
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             ui.add_space(10.0);
                             ui.label(theme::rich(
-                                format_interval(self.settings.poll_secs),
+                                widgets::interval_text(self.settings.poll_secs),
                                 12.5,
                                 p.secondary,
                                 true,
@@ -505,11 +555,20 @@ impl AnyBatteryApp {
                             .logarithmic(true)
                             .show_value(false),
                     );
+                    let dragging = slider.is_pointer_button_down_on();
                     if slider.changed() {
+                        // Value and label follow the drag immediately; the file is touched
+                        // once, when the drag ends (or on a keyboard/other non-drag change).
                         self.settings.poll_secs = poll.round() as u64;
                         self.settings.validate();
+                        if !dragging {
+                            self.save_settings();
+                        }
+                    }
+                    if self.poll_dragging && !dragging {
                         self.save_settings();
                     }
+                    self.poll_dragging = dragging;
                     ui.horizontal(|ui| {
                         ui.add_space(10.0);
                         for (label, value) in [("30 秒", 30u64), ("1 分钟", 60), ("5 分钟", 300), ("10 分钟", 600)] {
@@ -521,7 +580,6 @@ impl AnyBatteryApp {
                     });
                     ui.add_space(8.0);
                 });
-
                 ui.add_space(14.0);
                 widgets::section_title(ui, p, "通知");
                 widgets::group(ui, p, |ui| {
@@ -535,7 +593,6 @@ impl AnyBatteryApp {
                         self.save_settings();
                     }
                 });
-
                 ui.add_space(14.0);
                 widgets::section_title(ui, p, "外观");
                 widgets::group(ui, p, |ui| {
@@ -583,7 +640,6 @@ impl AnyBatteryApp {
                         self.save_settings();
                     }
                 });
-
                 ui.add_space(14.0);
                 widgets::section_title(ui, p, "系统");
                 widgets::group(ui, p, |ui| {
@@ -593,12 +649,8 @@ impl AnyBatteryApp {
                         changed = widgets::toggle(ui, p, &mut autostart);
                     });
                     if changed {
-                        if system::set_autostart(autostart) {
-                            self.settings.autostart = autostart;
-                            self.save_settings();
-                        } else {
-                            self.toast("无法修改开机自启（注册表被拒绝）".to_owned());
-                        }
+                        self.apply_autostart(autostart);
+                        self.save_settings();
                     }
                     let mut show_unknown = self.settings.show_unknown;
                     let mut changed = false;
@@ -611,7 +663,6 @@ impl AnyBatteryApp {
                         self.request_scan();
                     }
                 });
-
                 ui.add_space(14.0);
                 ui.horizontal(|ui| {
                     if widgets::pill_button(ui, p, "打开配置目录", false).clicked() {
@@ -620,16 +671,18 @@ impl AnyBatteryApp {
                             .spawn();
                     }
                     if widgets::pill_button(ui, p, "恢复默认", false).clicked() {
-                        self.settings = Settings::default();
-                        system::set_autostart(false);
-                        self.save_settings();
-                        self.request_scan();
+                        // Turning autostart off is part of "defaults"; if the registry rejects
+                        // it, keep every current setting instead of pretending it is off.
+                        if self.apply_autostart(false) {
+                            self.settings = Settings::default();
+                            self.save_settings();
+                            self.request_scan();
+                        }
                     }
                 });
                 ui.add_space(18.0);
             });
     }
-
     fn diagnostics_page(&mut self, ui: &mut Ui, p: &Palette) {
         ui.add_space(10.0);
         ui.horizontal(|ui| {
@@ -649,12 +702,12 @@ impl AnyBatteryApp {
         ui.add_space(8.0);
         ui.label(theme::rich(
             format!(
-                "设备 {} · 蓝牙 {} · 2.4G {} · 手柄 {} · 每 {} 秒刷新",
+                "设备 {} · 蓝牙 {} · 2.4G {} · 手柄 {} · 每 {} 刷新",
                 self.devices.len(),
                 self.counts.0,
                 self.counts.1,
                 self.counts.2,
-                self.settings.poll_secs
+                widgets::interval_text(self.settings.poll_secs)
             ),
             10.5,
             p.tertiary,
@@ -685,33 +738,64 @@ impl AnyBatteryApp {
                     });
             });
     }
-
-    fn paint_toast(&self, ui: &mut Ui, p: &Palette) {
+    fn paint_toast(&mut self, ui: &mut Ui, p: &Palette) {
+        const TOAST_LIFE_SECS: f32 = 3.0;
         let Some((message, created)) = &self.toast else {
             return;
         };
-        if created.elapsed() > Duration::from_secs(3) {
+        let elapsed = created.elapsed().as_secs_f32();
+        if elapsed > TOAST_LIFE_SECS {
+            self.toast = None;
             return;
         }
+        // Fade in over the first 120 ms and out over the last 180 ms; with animations off the
+        // toast is fully opaque until it disappears.
+        let shown = if self.animations {
+            let rise = (elapsed / 0.12).clamp(0.0, 1.0);
+            let fall = ((TOAST_LIFE_SECS - elapsed) / 0.18).clamp(0.0, 1.0);
+            // Animate the fades with short frames, but sleep until the fade-out begins.
+            let until_fade_out = TOAST_LIFE_SECS - 0.18 - elapsed;
+            let next = if elapsed < 0.12 {
+                0.016
+            } else if until_fade_out > 0.0 {
+                until_fade_out
+            } else {
+                0.016
+            };
+            ui.ctx()
+                .request_repaint_after(Duration::from_secs_f32(next.max(0.016)));
+            rise.min(fall)
+        } else {
+            1.0
+        };
         let rect = ui.max_rect();
-        let text_width = message.chars().count() as f32 * 12.0;
-        let width = text_width.min(rect.width() - 60.0).max(120.0);
+        let text = widgets::fit_text(ui, message, 12.0, false, rect.width() - 76.0);
+        let text_width = ui
+            .painter()
+            .layout_no_wrap(text.clone(), FontId::new(12.0, egui::FontFamily::Proportional), p.text)
+            .size()
+            .x;
+        let width = (text_width + 32.0).min(rect.width() - 60.0).max(120.0);
         let toast = Rect::from_center_size(
-            Pos2::new(rect.center().x, rect.bottom() - 58.0),
+            Pos2::new(rect.center().x, rect.bottom() - 58.0 + (1.0 - shown) * 6.0),
             vec2(width, 32.0),
         );
-        icons::draw_pixel_shadow(ui.painter(), toast, p.shadow);
-        icons::pixel_frame(ui.painter(), toast, p.card_solid, p.card_border);
+        icons::draw_pixel_shadow(ui.painter(), toast, p.shadow.gamma_multiply(shown));
+        icons::pixel_frame(
+            ui.painter(),
+            toast,
+            p.card_solid.gamma_multiply(shown),
+            p.card_border.gamma_multiply(shown),
+        );
         ui.painter().text(
             toast.center(),
             Align2::CENTER_CENTER,
-            widgets::truncate(message, 32),
+            text,
             FontId::new(12.0, egui::FontFamily::Proportional),
-            p.text,
+            p.text.gamma_multiply(shown),
         );
     }
 }
-
 impl eframe::App for AnyBatteryApp {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         let p = theme::palette(self.dark);
@@ -722,7 +806,6 @@ impl eframe::App for AnyBatteryApp {
             1.0,
         ]
     }
-
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.process_commands(ctx);
         if ctx.input(|i| i.viewport().close_requested()) && !self.quitting {
@@ -737,7 +820,6 @@ impl eframe::App for AnyBatteryApp {
         self.maybe_refresh_theme(ctx);
         ctx.request_repaint_after(Duration::from_secs(1));
     }
-
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         if self.quitting {
             return;
@@ -764,8 +846,17 @@ impl eframe::App for AnyBatteryApp {
         self.paint_toast(&mut child, &p);
     }
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EmptyState {
+    Scanning,
+    NoDevices,
+    Filtered,
+}
 
-fn empty_state(ui: &mut Ui, p: &Palette, scanning: bool) {
+/// Draws the placeholder for an empty device list. Returns `true` when the user asked to
+/// leave the current filter, so the caller can switch back to "全部".
+fn empty_state(ui: &mut Ui, p: &Palette, empty: EmptyState) -> bool {
+    let mut show_all = false;
     ui.add_space(48.0);
     ui.vertical_centered(|ui| {
         let (rect, _) = ui.allocate_exact_size(vec2(64.0, 64.0), Sense::hover());
@@ -779,34 +870,27 @@ fn empty_state(ui: &mut Ui, p: &Palette, scanning: bool) {
             p.tertiary,
         );
         ui.add_space(14.0);
-        ui.label(theme::rich(
-            if scanning { "正在扫描设备…" } else { "未发现带电池的设备" },
-            18.0,
-            p.text,
-            true,
-        ));
+        let (title, hint) = match empty {
+            EmptyState::Scanning => (
+                "正在扫描设备…",
+                "扫描完成后会在这里列出能读取电量的设备",
+            ),
+            EmptyState::NoDevices => (
+                "未发现可读取电量的设备",
+                "确认设备已连接并处于开启状态；2.4G 接收器需插好，休眠设备需先唤醒。可打开设置调整显示范围",
+            ),
+            EmptyState::Filtered => (
+                "该分类暂无设备",
+                "当前筛选下没有设备，其他分类仍可能有数据",
+            ),
+        };
+        ui.label(theme::rich(title, 18.0, p.text, true));
         ui.add_space(4.0);
-        ui.label(theme::rich(
-            "插入蓝牙或 2.4G 设备；有线设备不会显示",
-            12.0,
-            p.secondary,
-            false,
-        ));
-    });
-}
-
-fn format_interval(seconds: u64) -> String {
-    if seconds < 60 {
-        format!("{} 秒", seconds)
-    } else if seconds < 3600 {
-        let minutes = seconds / 60;
-        let rest = seconds % 60;
-        if rest == 0 {
-            format!("{} 分钟", minutes)
-        } else {
-            format!("{} 分 {} 秒", minutes, rest)
+        ui.label(theme::rich(hint, 12.0, p.secondary, false));
+        if empty == EmptyState::Filtered {
+            ui.add_space(10.0);
+            show_all = widgets::pill_button(ui, p, "查看全部", false).clicked();
         }
-    } else {
-        format!("{} 小时", seconds / 3600)
-    }
+    });
+    show_all
 }

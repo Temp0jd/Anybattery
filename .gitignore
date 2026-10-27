@@ -15,3 +15,6 @@ Thumbs.db
 # Local config
 /data
 portable.txt
+
+# Preview builds
+/dist/
