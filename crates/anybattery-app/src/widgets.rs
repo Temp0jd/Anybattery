@@ -86,16 +86,15 @@ pub fn device_card(ui: &mut Ui, p: &Palette, device: &DeviceSnapshot, now: u64) 
 
     let accent = icons::device_accent(device.kind);
     let tile = Rect::from_min_size(
-        Pos2::new(rect.left() + 10.0, rect.top() + 12.0),
-        vec2(30.0, 30.0),
+        Pos2::new(rect.left() + 12.0, rect.top() + 12.0),
+        vec2(32.0, 32.0),
     );
-    painter.rect_filled(tile, CornerRadius::ZERO, accent.gamma_multiply(0.16));
-    painter.rect_stroke(tile, CornerRadius::ZERO, Stroke::new(2.0, accent), StrokeKind::Inside);
+    icons::pixel_frame(painter, tile, accent, p.card_border);
     icons::draw_device_icon(
         painter,
         Rect::from_center_size(tile.center(), vec2(20.0, 20.0)),
         device.kind,
-        accent,
+        p.on_accent,
     );
 
     // Right column: the reading. Its width is measured once and shared by all rows.
@@ -115,7 +114,7 @@ pub fn device_card(ui: &mut Ui, p: &Palette, device: &DeviceSnapshot, now: u64) 
         }
         BatteryReading::Unknown => BAR_WIDTH,
     };
-    let left = rect.left() + 52.0;
+    let left = rect.left() + 56.0;
     let text_width = (right - reading_width - 10.0 - left).max(16.0);
 
     let title_font = FontId::new(12.0, FontFamily::Name("bold".into()));
@@ -707,30 +706,29 @@ pub fn footer(
     scanning: bool,
 ) -> Response {
     let width = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(vec2(width, 44.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 40.0), Sense::hover());
     let painter = ui.painter();
     painter.line_segment(
         [Pos2::new(rect.left(), rect.top() + 1.0), Pos2::new(rect.right(), rect.top() + 1.0)],
         Stroke::new(2.0, p.card_border),
     );
-    let text_width = (rect.width() - 82.0).max(40.0);
-    painter.text(
-        Pos2::new(rect.left() + 2.0, rect.top() + 13.0),
-        Align2::LEFT_CENTER,
-        fit_text(ui, &format!("每 {}", interval_text(poll_secs)), 12.0, false, text_width),
-        FontId::new(12.0, FontFamily::Proportional),
-        p.tertiary,
+    let button_rect = Rect::from_min_size(
+        Pos2::new(rect.right() - 74.0, rect.center().y - 14.0),
+        vec2(74.0, 28.0),
     );
+    let text_width = (button_rect.left() - (rect.left() + 2.0) - 10.0).max(40.0);
     painter.text(
-        Pos2::new(rect.left() + 2.0, rect.top() + 31.0),
+        Pos2::new(rect.left() + 2.0, rect.center().y),
         Align2::LEFT_CENTER,
-        fit_text(ui, &scan_age_text(last_scan, scanning), 12.0, false, text_width),
+        fit_text(
+            ui,
+            &format!("每 {} / {}", interval_text(poll_secs), scan_age_text(last_scan, scanning)),
+            12.0,
+            false,
+            text_width,
+        ),
         FontId::new(12.0, FontFamily::Proportional),
         if scanning { p.text } else { p.tertiary },
-    );
-    let button_rect = Rect::from_min_size(
-        Pos2::new(rect.right() - 62.0, rect.center().y - 13.0),
-        vec2(62.0, 26.0),
     );
     let response = ui.interact(button_rect, Id::new("footer.diagnostics"), Sense::click());
     let hover = ui.ctx().animate_bool(response.id.with("hover"), response.hovered());
@@ -744,8 +742,8 @@ pub fn footer(
         button_rect.center(),
         Align2::CENTER_CENTER,
         "诊断",
-        FontId::new(12.0, FontFamily::Proportional),
-        p.secondary,
+        FontId::new(12.0, FontFamily::Name("bold".into())),
+        p.text,
     );
     response.on_hover_cursor(CursorIcon::PointingHand)
 }

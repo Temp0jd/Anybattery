@@ -193,7 +193,9 @@ pub fn device_accent(kind: DeviceKind) -> Color32 {
         DeviceKind::Speaker => Color32::from_rgb(217, 138, 43),
         DeviceKind::Controller => Color32::from_rgb(79, 138, 91),
         DeviceKind::Pen => Color32::from_rgb(123, 94, 167),
-        DeviceKind::Unknown => Color32::from_rgb(111, 106, 94),
+        // Neutral slate stays visible as a solid tile and against the on_accent glyph in both
+        // themes when the scanner genuinely cannot identify a device kind.
+        DeviceKind::Unknown => Color32::from_rgb(126, 131, 141),
     }
 }
 

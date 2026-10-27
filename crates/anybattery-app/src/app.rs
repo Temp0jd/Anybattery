@@ -670,12 +670,12 @@ impl AnyBatteryApp {
         painter.text(
             Pos2::new(title_left, bar.top() + 15.0),
             Align2::LEFT_CENTER,
-            widgets::fit_text(ui, &title, 22.0, true, title_width),
-            FontId::new(22.0, egui::FontFamily::Name("bold".into())),
+            widgets::fit_text(ui, &title, 28.0, true, title_width),
+            FontId::new(28.0, egui::FontFamily::Name("bold".into())),
             p.text,
         );
         painter.text(
-            Pos2::new(title_left, bar.top() + 35.0),
+            Pos2::new(title_left, bar.top() + 42.0),
             Align2::LEFT_CENTER,
             widgets::fit_text(ui, &subtitle, 11.0, false, title_width),
             FontId::new(11.0, egui::FontFamily::Proportional),
@@ -688,19 +688,18 @@ impl AnyBatteryApp {
             if let Some(alert) = &self.alert {
                 let width = ui.available_width();
                 let (rect, _) = ui.allocate_exact_size(vec2(width, 34.0), Sense::hover());
-                icons::draw_pixel_shadow(ui.painter(), rect, p.shadow);
-                icons::pixel_frame(ui.painter(), rect, p.orange.gamma_multiply(0.18), p.card_border);
+                icons::pixel_frame(ui.painter(), rect, p.warning_bg, p.card_border);
                 ui.painter().rect_filled(
-                    Rect::from_min_size(Pos2::new(rect.left() + 10.0, rect.center().y - 4.0), vec2(8.0, 8.0)),
+                    Rect::from_min_size(Pos2::new(rect.left() + 10.0, rect.center().y - 6.0), vec2(12.0, 12.0)),
                     CornerRadius::ZERO,
-                    p.orange,
+                    p.accent,
                 );
                 ui.painter().text(
-                    Pos2::new(rect.left() + 28.0, rect.center().y),
+                    Pos2::new(rect.left() + 30.0, rect.center().y),
                     Align2::LEFT_CENTER,
-                    widgets::fit_text(ui, alert, 12.0, false, ui.available_width() - 36.0),
-                    FontId::new(12.0, egui::FontFamily::Proportional),
-                    p.orange,
+                    widgets::fit_text(ui, alert, 12.0, true, ui.available_width() - 40.0),
+                    FontId::new(12.0, egui::FontFamily::Name("bold".into())),
+                    p.warning_text,
                 );
                 ui.add_space(8.0);
             }
@@ -712,34 +711,42 @@ impl AnyBatteryApp {
             self.filter = Filter::from_index(index);
         }
         ui.add_space(10.0);
-        let list_height = (ui.available_height() - 50.0).max(80.0);
+        let now = now_unix();
+        let filtered: Vec<&DeviceSnapshot> = self
+            .devices
+            .iter()
+            .filter(|device| self.filter.matches(device))
+            .collect();
+        // Reserve exactly what the cards need instead of the whole page. With few devices the
+        // footer follows the last card; with many it stays outside a capped scroll area.
+        let content_height = filtered.len() as f32 * (widgets::CARD_HEIGHT + 8.0) + 4.0;
+        let available = (ui.available_height() - 50.0).max(80.0);
+        let list_height = if filtered.is_empty() {
+            available
+        } else {
+            content_height.min(available).max(80.0)
+        };
+        let empty = if self.scanning {
+            EmptyState::Scanning
+        } else if self.devices.is_empty() {
+            EmptyState::NoDevices
+        } else {
+            EmptyState::Filtered
+        };
         let mut show_all = false;
         egui::ScrollArea::vertical()
             .max_height(list_height)
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                let now = now_unix();
-                let filtered: Vec<&DeviceSnapshot> = self
-                    .devices
-                    .iter()
-                    .filter(|device| self.filter.matches(device))
-                    .collect();
                 if filtered.is_empty() {
                     // Three distinct situations: a scan in flight, nothing found at all, or
                     // only the current filter came up empty.
-                    let empty = if self.scanning {
-                        EmptyState::Scanning
-                    } else if self.devices.is_empty() {
-                        EmptyState::NoDevices
-                    } else {
-                        EmptyState::Filtered
-                    };
                     if empty_state(ui, p, empty) {
                         show_all = true;
                     }
                 } else {
-                    for device in filtered {
+                    for device in &filtered {
                         widgets::device_card(ui, p, device, now);
                         ui.add_space(8.0);
                     }
@@ -1063,8 +1070,8 @@ impl eframe::App for AnyBatteryApp {
         self.titlebar(ui, &p, maximized);
         let rect = ui.max_rect();
         let content = Rect::from_min_max(
-            Pos2::new(rect.left() + 20.0, rect.top() + widgets::TITLEBAR_HEIGHT + 12.0),
-            Pos2::new(rect.right() - 20.0, rect.bottom() - 12.0),
+            Pos2::new(rect.left() + 16.0, rect.top() + widgets::TITLEBAR_HEIGHT + 12.0),
+            Pos2::new(rect.right() - 16.0, rect.bottom() - 12.0),
         );
         let mut child = ui.new_child(
             UiBuilder::new()

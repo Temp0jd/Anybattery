@@ -32,6 +32,8 @@ pub struct Palette {
     pub green: Color32,
     pub orange: Color32,
     pub red: Color32,
+    pub warning_bg: Color32,
+    pub warning_text: Color32,
     pub shadow: Color32,
 }
 
@@ -55,6 +57,8 @@ pub fn palette(dark: bool) -> Palette {
             green: Color32::from_rgb(112, 168, 118),
             orange: Color32::from_rgb(230, 160, 70),
             red: Color32::from_rgb(224, 90, 80),
+            warning_bg: Color32::from_rgb(240, 195, 106),
+            warning_text: Color32::from_rgb(35, 33, 29),
             shadow: Color32::from_rgb(12, 11, 9),
         }
     } else {
@@ -76,6 +80,8 @@ pub fn palette(dark: bool) -> Palette {
             green: GREEN,
             orange: ORANGE,
             red: RED,
+            warning_bg: Color32::from_rgb(240, 195, 106),
+            warning_text: Color32::from_rgb(43, 40, 35),
             shadow: Color32::from_rgb(46, 43, 38),
         }
     }
@@ -285,6 +291,7 @@ mod tests {
                 (p.tertiary, p.bg),
                 (p.secondary, p.card),
                 (p.on_accent, p.accent),
+                (p.warning_text, p.warning_bg),
             ] {
                 let ratio = contrast(fg, bg);
                 assert!(ratio >= 4.5, "contrast {:.2} below 4.5 (dark={})", ratio, dark);
