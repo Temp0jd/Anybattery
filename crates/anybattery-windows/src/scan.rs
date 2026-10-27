@@ -37,6 +37,7 @@ pub fn scan(settings: &Settings) -> ScanResult {
     }
 
     let interfaces = hid::enumerate();
+    let oem_paths = vendor::select_oem_paths(&interfaces);
     diagnostics.push(format!("HID 接口: {}", interfaces.len()));
     for info in &interfaces {
         diagnostics.push(format!(
@@ -57,7 +58,7 @@ pub fn scan(settings: &Settings) -> ScanResult {
             .map(|id| format!("container:{}", id))
             .unwrap_or_else(|| format!("hid:{:04X}:{:04X}:{}", info.vendor_id, info.product_id, hid::short_hash(&info.path)));
 
-        let readings = vendor::read_vendor(info);
+        let readings = vendor::read_vendor(info, &oem_paths);
         if !readings.is_empty() {
             for reading in &readings {
                 let device_key = match reading.key_suffix.as_ref() {
@@ -142,7 +143,7 @@ fn snapshot_from_vendor(info: &hid::HidInterface, reading: &vendor::VendorReadin
         DeviceId::new("hid", &id),
         name.clone(),
         reading.kind.unwrap_or_else(|| DeviceKind::infer_from_name(&name)),
-        hid::transport_for(&info.path, info.vendor_id),
+        hid::transport_for_product(&info.path, info.vendor_id, info.product_id),
         BatterySource::new(reading.provider, reading.verification, reading.detail.clone()),
     )
     .with_battery(BatteryReading::percent(reading.level, reading.charging), now)
@@ -159,7 +160,7 @@ fn unsupported_snapshot(info: &hid::HidInterface, now: u64) -> DeviceSnapshot {
         DeviceId::new("hid", &id),
         info.label(),
         DeviceKind::infer_from_name(&info.product),
-        hid::transport_for(&info.path, info.vendor_id),
+        hid::transport_for_product(&info.path, info.vendor_id, info.product_id),
         BatterySource::new("HID 接口", Confidence::Unverified, "尚未匹配电量协议"),
     )
     .with_detail("已连接 · 未找到电量协议")
@@ -176,11 +177,12 @@ fn likely_wireless(info: &hid::HidInterface) -> bool {
         "wireless", "hyperspeed", "lightspeed", "receiver", "dongle", "2.4g", "air", "pro",
     ];
     words.iter().any(|word| name.contains(word))
+        || hid::is_wireless_product(info.vendor_id, info.product_id)
         || matches!(
             info.vendor_id,
             0x046D | 0x1532 | 0x3554 | 0x373B | 0x3710 | 0x3770 | 0x3057 | 0x3367 | 0x1915
                 | 0x3654 | 0x1038 | 0x03F0 | 0x1B1C | 0x0B05 | 0x3434 | 0x388D | 0x1E71
-                | 0x5253 | 0x3329 | 0x0ECB | 0x28DE
+                | 0x36A7 | 0x373E | 0x2023 | 0x5253 | 0x3329 | 0x0ECB | 0x28DE | 0x1D57
         )
 }
 

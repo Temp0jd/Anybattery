@@ -1,10 +1,11 @@
 use anybattery_core::{now_unix, BatteryStatus, DeviceSnapshot, Settings, Theme};
 use anybattery_windows::{scan, ScanResult, system};
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use crossbeam_channel::{unbounded, Receiver, Sender, TryRecvError};
 use eframe::egui::{
-    self, Align, Align2, CornerRadius, FontId, Layout, Pos2, Rect, RichText, Sense, Stroke,
-    StrokeKind, Ui, UiBuilder, ViewportCommand, vec2,
+    self, Align, Align2, CornerRadius, CursorIcon, FontId, Id, Layout, PointerButton, Pos2, Rect,
+    RichText, Sense, Stroke, StrokeKind, Ui, UiBuilder, ViewportCommand, vec2,
 };
+use std::cmp::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use crate::icons;
@@ -88,6 +89,9 @@ pub struct AnyBatteryApp {
     scanning: bool,
     /// A scan was requested while another one was running; run exactly one more when it ends.
     rescan_pending: bool,
+    /// Set when the scan worker or its result channel has failed. Further work is suppressed
+    /// so a dead service cannot trigger a retry loop or a per-frame error toast.
+    scan_service_stopped: bool,
     /// True while the refresh-interval slider is being dragged, so the config is written once
     /// at the end of the gesture instead of on every pixel.
     poll_dragging: bool,
@@ -131,6 +135,7 @@ impl AnyBatteryApp {
             filter: Filter::All,
             scanning: true,
             rescan_pending: false,
+            scan_service_stopped: false,
             poll_dragging: false,
             last_scan: None,
             service,
@@ -149,53 +154,92 @@ impl AnyBatteryApp {
         };
         // The initial scan request is the first thing the worker thread receives.
         if app.service.requests.send(app.settings.clone()).is_err() {
-            app.scanning = false;
-            app.diagnostics = vec!["扫描线程未能启动".to_owned()];
+            app.diagnostics.clear();
+            app.mark_scan_service_stopped("启动扫描线程失败");
         }
         app.update_tray();
         app
     }
-    /// Start a scan right now. While one is running the request is recorded, so at most one
-    /// follow-up scan runs after it — never two scans at once, never a scan loop.
+    /// Refresh now. While a scan is already running this is a no-op, so an impatient click can
+    /// never stack more expensive HID scans. Display-setting changes use [`Self::queue_rescan`].
     fn request_scan(&mut self) {
+        if self.scan_service_stopped {
+            self.toast("扫描线程已停止，请重新启动应用".to_owned());
+            return;
+        }
         if self.scanning {
-            self.rescan_pending = true;
             return;
         }
         self.start_scan();
     }
+    /// Record at most one follow-up scan for a change that affects what the scan must return
+    /// (for example "show devices without a battery"). When idle it starts immediately.
+    fn queue_rescan(&mut self) {
+        if self.scan_service_stopped {
+            self.toast("扫描线程已停止，请重新启动应用".to_owned());
+            return;
+        }
+        if self.scanning {
+            self.rescan_pending = true;
+        } else {
+            self.start_scan();
+        }
+    }
     fn start_scan(&mut self) {
         match self.service.requests.send(self.settings.clone()) {
             Ok(()) => self.scanning = true,
-            Err(_) => {
-                self.scanning = false;
-                self.rescan_pending = false;
-                self.toast("扫描线程已停止".to_owned());
-            }
+            Err(_) => self.mark_scan_service_stopped("发送扫描请求失败"),
         }
     }
+    /// Leave the scanning state once, report it through the existing Chinese toast/diagnostics
+    /// style, and stay stopped: no automatic or per-frame retry of a dead worker.
+    fn mark_scan_service_stopped(&mut self, detail: &str) {
+        if self.scan_service_stopped {
+            return;
+        }
+        self.scan_service_stopped = true;
+        self.scanning = false;
+        self.rescan_pending = false;
+        self.toast("扫描线程已停止，无法继续刷新设备".to_owned());
+        self.diagnostics
+            .insert(0, format!("扫描线程已停止：{}", detail));
+    }
     fn poll_results(&mut self, ctx: &egui::Context) {
-        while let Ok(result) = self.service.results.try_recv() {
-            self.scanning = false;
-            // Apply changes made during the scan once, with the settings that are current now.
-            if self.rescan_pending {
-                self.rescan_pending = false;
-                self.start_scan();
+        if self.scan_service_stopped {
+            return;
+        }
+        loop {
+            match self.service.results.try_recv() {
+                Ok(result) => {
+                    self.scanning = false;
+                    // Apply changes made during the scan once, with the settings that are current now.
+                    if self.rescan_pending {
+                        self.rescan_pending = false;
+                        self.start_scan();
+                    }
+                    self.last_scan = Some(Instant::now());
+                    self.devices = result.devices;
+                    sort_devices_for_display(&mut self.devices);
+                    let mut diagnostics = Vec::with_capacity(result.diagnostics.len() + 2);
+                    diagnostics.push(format!(
+                        "扫描完成：{} 台设备，{} 个蓝牙节点，{} 个 HID 接口",
+                        self.devices.len(),
+                        result.bluetooth_count,
+                        result.hid_count
+                    ));
+                    diagnostics.extend(result.diagnostics);
+                    self.diagnostics = diagnostics;
+                    self.update_counts();
+                    self.update_tray();
+                    ctx.request_repaint();
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.mark_scan_service_stopped("结果通道已断开，扫描线程可能异常退出");
+                    ctx.request_repaint();
+                    break;
+                }
             }
-            self.last_scan = Some(Instant::now());
-            self.devices = result.devices;
-            let mut diagnostics = Vec::with_capacity(result.diagnostics.len() + 2);
-            diagnostics.push(format!(
-                "扫描完成：{} 台设备，{} 个蓝牙节点，{} 个 HID 接口",
-                self.devices.len(),
-                result.bluetooth_count,
-                result.hid_count
-            ));
-            diagnostics.extend(result.diagnostics);
-            self.diagnostics = diagnostics;
-            self.update_counts();
-            self.update_tray();
-            ctx.request_repaint();
         }
     }
     fn update_counts(&mut self) {
@@ -271,7 +315,8 @@ impl AnyBatteryApp {
             match command {
                 UiCommand::Show => self.show(ctx),
                 UiCommand::Toggle => {
-                    if self.hidden {
+                    let minimized = ctx.input(|input| input.viewport().minimized.unwrap_or(false));
+                    if self.hidden || minimized {
                         self.show(ctx);
                     } else {
                         self.hide(ctx);
@@ -319,6 +364,8 @@ impl AnyBatteryApp {
     fn show(&mut self, ctx: &egui::Context) {
         self.hidden = false;
         ctx.send_viewport_cmd(ViewportCommand::Visible(true));
+        // A tray click must bring a minimized window back, not leave it in the taskbar.
+        ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(ViewportCommand::Focus);
         ctx.request_repaint();
     }
@@ -327,7 +374,7 @@ impl AnyBatteryApp {
         ctx.send_viewport_cmd(ViewportCommand::Visible(false));
     }
     fn maybe_auto_scan(&mut self) {
-        if self.scanning {
+        if self.scan_service_stopped || self.scanning {
             return;
         }
         let due = self
@@ -357,6 +404,189 @@ impl AnyBatteryApp {
             }));
         }
     }
+    /// Custom title bar: it replaces the native caption while keeping the OS drag loop
+    /// (`StartDrag`) so Windows snap layouts and the normal move animation still work.
+    fn titlebar(&mut self, ui: &mut Ui, p: &Palette, maximized: bool) {
+        let outer = ui.max_rect();
+        let bar = Rect::from_min_max(
+            Pos2::new(outer.left() + 2.0, outer.top() + 2.0),
+            Pos2::new(outer.right() - 2.0, outer.top() + widgets::TITLEBAR_HEIGHT),
+        );
+        let painter = ui.painter();
+        painter.rect_filled(bar, CornerRadius::ZERO, p.bg_glow);
+        painter.rect_filled(
+            Rect::from_min_size(
+                Pos2::new(bar.left(), bar.bottom() - 2.0),
+                vec2(bar.width(), 2.0),
+            ),
+            CornerRadius::ZERO,
+            p.card_border,
+        );
+
+        let icon_size = 20.0;
+        let icon = Rect::from_center_size(
+            Pos2::new(bar.left() + 8.0 + icon_size / 2.0, bar.center().y),
+            vec2(icon_size, icon_size),
+        );
+        icons::draw_battery_mark(painter, icon, p);
+        painter.text(
+            Pos2::new(icon.right() + 7.0, bar.center().y),
+            Align2::LEFT_CENTER,
+            "AnyBattery",
+            FontId::new(13.0, egui::FontFamily::Name("bold".into())),
+            p.text,
+        );
+
+        let layout = widgets::caption_button_layout(bar);
+        if widgets::caption_button(
+            ui,
+            p,
+            layout.minimize,
+            widgets::Glyph::Minimize,
+            "最小化",
+            false,
+        )
+        .clicked()
+        {
+            ui.ctx().send_viewport_cmd(ViewportCommand::Minimized(true));
+        }
+        let maximize_glyph = if maximized {
+            widgets::Glyph::Restore
+        } else {
+            widgets::Glyph::Maximize
+        };
+        if widgets::caption_button(
+            ui,
+            p,
+            layout.maximize,
+            maximize_glyph,
+            if maximized { "还原" } else { "最大化" },
+            false,
+        )
+        .clicked()
+        {
+            ui.ctx()
+                .send_viewport_cmd(ViewportCommand::Maximized(!maximized));
+            ui.ctx().request_repaint();
+        }
+        if widgets::caption_button(
+            ui,
+            p,
+            layout.close,
+            widgets::Glyph::Close,
+            "关闭到托盘",
+            true,
+        )
+        .clicked()
+        {
+            self.hide(ui.ctx());
+        }
+
+        // Leave the button cluster out of the drag target so a press on a caption button can
+        // never start a window move on the same frame.
+        let drag_rect = Rect::from_min_max(
+            Pos2::new(bar.left() + 4.0, bar.top() + 4.0),
+            Pos2::new(layout.right_edge() - 6.0, bar.bottom() - 2.0),
+        );
+        let drag = ui.interact(drag_rect, Id::new("anybattery.titlebar.drag"), Sense::click_and_drag());
+        if drag.double_clicked_by(PointerButton::Primary) {
+            ui.ctx()
+                .send_viewport_cmd(ViewportCommand::Maximized(!maximized));
+            ui.ctx().request_repaint();
+        } else if drag.drag_started_by(PointerButton::Primary) {
+            ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag);
+        }
+    }
+
+    /// Resize handles for a decorated=false window. They are registered after the page so they
+    /// win hit-testing in the outer margin, where no page content is drawn.
+    fn resize_handles(&self, ui: &Ui, maximized: bool) {
+        if maximized {
+            return;
+        }
+        use egui::viewport::ResizeDirection;
+
+        let rect = ui.max_rect();
+        let edge = 6.0;
+        let corner = 12.0;
+        let edges = [
+            (
+                ResizeDirection::North,
+                Rect::from_min_max(
+                    Pos2::new(rect.left() + corner, rect.top()),
+                    Pos2::new(rect.right() - corner, rect.top() + edge),
+                ),
+                CursorIcon::ResizeNorth,
+            ),
+            (
+                ResizeDirection::South,
+                Rect::from_min_max(
+                    Pos2::new(rect.left() + corner, rect.bottom() - edge),
+                    Pos2::new(rect.right() - corner, rect.bottom()),
+                ),
+                CursorIcon::ResizeSouth,
+            ),
+            (
+                ResizeDirection::West,
+                Rect::from_min_max(
+                    Pos2::new(rect.left(), rect.top() + corner),
+                    Pos2::new(rect.left() + edge, rect.bottom() - corner),
+                ),
+                CursorIcon::ResizeWest,
+            ),
+            (
+                ResizeDirection::East,
+                Rect::from_min_max(
+                    Pos2::new(rect.right() - edge, rect.top() + corner),
+                    Pos2::new(rect.right(), rect.bottom() - corner),
+                ),
+                CursorIcon::ResizeEast,
+            ),
+            (
+                ResizeDirection::NorthWest,
+                Rect::from_min_max(rect.min, Pos2::new(rect.left() + corner, rect.top() + corner)),
+                CursorIcon::ResizeNorthWest,
+            ),
+            (
+                ResizeDirection::NorthEast,
+                Rect::from_min_max(
+                    Pos2::new(rect.right() - corner, rect.top()),
+                    Pos2::new(rect.right(), rect.top() + corner),
+                ),
+                CursorIcon::ResizeNorthEast,
+            ),
+            (
+                ResizeDirection::SouthWest,
+                Rect::from_min_max(
+                    Pos2::new(rect.left(), rect.bottom() - corner),
+                    Pos2::new(rect.left() + corner, rect.bottom()),
+                ),
+                CursorIcon::ResizeSouthWest,
+            ),
+            (
+                ResizeDirection::SouthEast,
+                Rect::from_min_max(
+                    Pos2::new(rect.right() - corner, rect.bottom() - corner),
+                    Pos2::new(rect.right(), rect.bottom()),
+                ),
+                CursorIcon::ResizeSouthEast,
+            ),
+        ];
+        for (index, (direction, area, cursor)) in edges.into_iter().enumerate() {
+            let response = ui.interact(
+                area,
+                Id::new(("anybattery.resize", index)),
+                Sense::click(),
+            );
+            if response.hovered() {
+                ui.ctx().set_cursor_icon(cursor);
+                if ui.input(|input| input.pointer.button_pressed(PointerButton::Primary)) {
+                    ui.ctx().send_viewport_cmd(ViewportCommand::BeginResize(direction));
+                }
+            }
+        }
+    }
+
     fn paint_background(&self, ui: &mut Ui, p: &Palette) {
         let rect = ui.max_rect();
         let painter = ui.painter();
@@ -555,20 +785,18 @@ impl AnyBatteryApp {
                             .logarithmic(true)
                             .show_value(false),
                     );
-                    let dragging = slider.is_pointer_button_down_on();
+                    let holding = slider.is_pointer_button_down_on();
                     if slider.changed() {
                         // Value and label follow the drag immediately; the file is touched
                         // once, when the drag ends (or on a keyboard/other non-drag change).
                         self.settings.poll_secs = poll.round() as u64;
                         self.settings.validate();
-                        if !dragging {
-                            self.save_settings();
-                        }
                     }
-                    if self.poll_dragging && !dragging {
+                    let drag_ended = self.poll_dragging && !holding;
+                    if drag_ended || (slider.changed() && !holding) {
                         self.save_settings();
                     }
-                    self.poll_dragging = dragging;
+                    self.poll_dragging = holding;
                     ui.horizontal(|ui| {
                         ui.add_space(10.0);
                         for (label, value) in [("30 秒", 30u64), ("1 分钟", 60), ("5 分钟", 300), ("10 分钟", 600)] {
@@ -660,7 +888,7 @@ impl AnyBatteryApp {
                     if changed {
                         self.settings.show_unknown = show_unknown;
                         self.save_settings();
-                        self.request_scan();
+                        self.queue_rescan();
                     }
                 });
                 ui.add_space(14.0);
@@ -676,7 +904,7 @@ impl AnyBatteryApp {
                         if self.apply_autostart(false) {
                             self.settings = Settings::default();
                             self.save_settings();
-                            self.request_scan();
+                            self.queue_rescan();
                         }
                     }
                 });
@@ -686,7 +914,8 @@ impl AnyBatteryApp {
     fn diagnostics_page(&mut self, ui: &mut Ui, p: &Palette) {
         ui.add_space(10.0);
         ui.horizontal(|ui| {
-            if widgets::pill_button(ui, p, "刷新", false).clicked() {
+            let refresh_label = if self.scanning { "扫描中…" } else { "刷新" };
+            if widgets::pill_button_enabled(ui, p, refresh_label, false, !self.scanning).clicked() {
                 self.request_scan();
             }
             if widgets::pill_button(ui, p, "复制诊断信息", false).clicked() {
@@ -748,8 +977,9 @@ impl AnyBatteryApp {
             self.toast = None;
             return;
         }
-        // Fade in over the first 120 ms and out over the last 180 ms; with animations off the
-        // toast is fully opaque until it disappears.
+        // Fade in over the first 120 ms and out over the last 180 ms. With animations off the
+        // toast is fully opaque and a single repaint is scheduled for its expiry, so it cannot
+        // linger until the next one-second application tick or cause continuous repainting.
         let shown = if self.animations {
             let rise = (elapsed / 0.12).clamp(0.0, 1.0);
             let fall = ((TOAST_LIFE_SECS - elapsed) / 0.18).clamp(0.0, 1.0);
@@ -766,6 +996,9 @@ impl AnyBatteryApp {
                 .request_repaint_after(Duration::from_secs_f32(next.max(0.016)));
             rise.min(fall)
         } else {
+            let remaining = (TOAST_LIFE_SECS - elapsed).max(0.016);
+            ui.ctx()
+                .request_repaint_after(Duration::from_secs_f32(remaining));
             1.0
         };
         let rect = ui.max_rect();
@@ -825,10 +1058,12 @@ impl eframe::App for AnyBatteryApp {
             return;
         }
         let p = theme::palette(self.dark);
+        let maximized = ui.ctx().input(|input| input.viewport().maximized.unwrap_or(false));
         self.paint_background(ui, &p);
+        self.titlebar(ui, &p, maximized);
         let rect = ui.max_rect();
         let content = Rect::from_min_max(
-            Pos2::new(rect.left() + 20.0, rect.top() + 14.0),
+            Pos2::new(rect.left() + 20.0, rect.top() + widgets::TITLEBAR_HEIGHT + 12.0),
             Pos2::new(rect.right() - 20.0, rect.bottom() - 12.0),
         );
         let mut child = ui.new_child(
@@ -844,8 +1079,36 @@ impl eframe::App for AnyBatteryApp {
             Page::Diagnostics => self.diagnostics_page(&mut child, &p),
         }
         self.paint_toast(&mut child, &p);
+        self.resize_handles(ui, maximized);
     }
 }
+/// Final display order required by DESIGN 8.2: lowest known percentage first, then the most
+/// recently updated device, then the name. The scanner already applies a coarse
+/// `DeviceSnapshot::sort_key` order, but its status group does not express "most recent first"
+/// and would put some no-percentage readings ahead of known percentages, so the UI re-sorts the
+/// final list. Readings without a percentage never get an invented level.
+fn compare_devices_for_display(a: &DeviceSnapshot, b: &DeviceSnapshot) -> Ordering {
+    match (a.percent(), b.percent()) {
+        (Some(a_level), Some(b_level)) => a_level
+            .cmp(&b_level)
+            .then_with(|| b.updated_at_unix.unwrap_or(0).cmp(&a.updated_at_unix.unwrap_or(0)))
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            .then_with(|| a.name.cmp(&b.name)),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => b
+            .updated_at_unix
+            .unwrap_or(0)
+            .cmp(&a.updated_at_unix.unwrap_or(0))
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            .then_with(|| a.name.cmp(&b.name)),
+    }
+}
+
+fn sort_devices_for_display(devices: &mut [DeviceSnapshot]) {
+    devices.sort_by(compare_devices_for_display);
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EmptyState {
     Scanning,
@@ -893,4 +1156,67 @@ fn empty_state(ui: &mut Ui, p: &Palette, empty: EmptyState) -> bool {
         }
     });
     show_all
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anybattery_core::{
+        BatteryReading, BatterySource, CoarseLevel, Confidence, DeviceId, DeviceKind, Transport,
+    };
+
+    fn sample(name: &str, percent: Option<u8>, updated: u64) -> DeviceSnapshot {
+        let mut device = DeviceSnapshot::new(
+            DeviceId::new("test", name),
+            name,
+            DeviceKind::Mouse,
+            Transport::BluetoothClassic,
+            BatterySource::new("test", Confidence::Verified, ""),
+        );
+        device.battery = match percent {
+            Some(level) => BatteryReading::percent(level, None),
+            None => BatteryReading::Unknown,
+        };
+        device.updated_at_unix = Some(updated);
+        device
+    }
+
+    fn coarse(name: &str, level: CoarseLevel, updated: u64) -> DeviceSnapshot {
+        let mut device = sample(name, None, updated);
+        device.battery = BatteryReading::Coarse { level };
+        device
+    }
+
+    fn names(devices: &[DeviceSnapshot]) -> Vec<&str> {
+        devices.iter().map(|device| device.name.as_str()).collect()
+    }
+
+    #[test]
+    fn devices_sort_by_low_percent_then_recent_then_name() {
+        let mut devices = vec![
+            sample("Zeta", Some(50), 100),
+            sample("Alpha", Some(50), 100),
+            sample("Old", Some(20), 10),
+            sample("New", Some(20), 20),
+            sample("High", Some(90), 50),
+            sample("Unknown", None, 999),
+        ];
+        sort_devices_for_display(&mut devices);
+        assert_eq!(
+            names(&devices),
+            ["New", "Old", "Alpha", "Zeta", "High", "Unknown"]
+        );
+    }
+
+    #[test]
+    fn readings_without_percentage_stay_after_percentages() {
+        let mut devices = vec![
+            coarse("Coarse Low", CoarseLevel::Low, 100),
+            sample("Ninety", Some(90), 5),
+            sample("Unknown", None, 200),
+            sample("One", Some(1), 5),
+        ];
+        sort_devices_for_display(&mut devices);
+        assert_eq!(names(&devices), ["One", "Ninety", "Unknown", "Coarse Low"]);
+    }
 }

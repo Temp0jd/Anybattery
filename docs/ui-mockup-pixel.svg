@@ -3,14 +3,25 @@
   <rect x="14" y="12" width="402" height="656" fill="#2E2B26"/>
   <rect x="17" y="15" width="396" height="650" fill="#E8E2D4"/>
 
-  <!-- native Windows title bar -->
+  <!-- self-drawn title bar: battery mark + AnyBattery + pixel caption buttons -->
   <rect x="17" y="15" width="396" height="40" fill="#F4EFE4"/>
   <rect x="17" y="53" width="396" height="2" fill="#2E2B26"/>
-  <text x="30" y="40" fill="#2E2B26" font-size="13" font-weight="bold">AnyBattery</text>
-  <!-- Windows caption buttons: minimize / maximize / close -->
-  <path d="M344 35h10" stroke="#2E2B26" stroke-width="2"/>
-  <rect x="366" y="29" width="10" height="10" fill="none" stroke="#2E2B26" stroke-width="2"/>
-  <path d="M394 29l8 8M402 29l-8 8" stroke="#2E2B26" stroke-width="2"/>
+  <g transform="translate(29,27)">
+    <rect x="2" y="0" width="10" height="1" fill="#2E2B26"/>
+    <rect x="2" y="0" width="1" height="10" fill="#2E2B26"/>
+    <rect x="11" y="0" width="1" height="10" fill="#2E2B26"/>
+    <rect x="2" y="9" width="10" height="1" fill="#2E2B26"/>
+    <rect x="3" y="1" width="8" height="8" fill="#F4EFE4"/>
+    <rect x="12" y="3" width="2" height="4" fill="#2E2B26"/>
+    <rect x="3" y="2" width="2" height="6" fill="#C8443C"/>
+    <rect x="6" y="2" width="2" height="6" fill="#C8443C"/>
+    <rect x="9" y="2" width="2" height="6" fill="#C8443C"/>
+  </g>
+  <text x="54" y="40" fill="#2E2B26" font-size="13" font-weight="bold">AnyBattery</text>
+  <!-- pixel caption buttons: minimize / maximize / close -->
+  <path d="M334 35h10" stroke="#2E2B26" stroke-width="2"/>
+  <rect x="360" y="29" width="10" height="10" fill="none" stroke="#2E2B26" stroke-width="2"/>
+  <path d="M393 29l8 8M401 29l-8 8" stroke="#2E2B26" stroke-width="2"/>
   <!-- app toolbar: refresh / settings -->
   <rect x="330" y="70" width="28" height="24" fill="#E3DCCB" stroke="#2E2B26" stroke-width="2"/>
   <text x="344" y="86" text-anchor="middle" fill="#2E2B26" font-size="12" font-weight="bold">R</text>
@@ -43,7 +54,7 @@
   <text x="86" y="242" fill="#2E2B26" font-size="13" font-weight="bold">雷蛇 炼狱蝰蛇 V3 PRO</text>
   <text x="86" y="262" fill="#6F6A5E" font-size="12">2.4G / 刚刚 / 已验证</text>
   <text x="382" y="246" text-anchor="end" fill="#2E2B26" font-size="24" font-weight="bold">62%</text>
-  <g fill="#C8443C">
+  <g fill="#687C24">
     <rect x="324" y="258" width="8" height="12"/><rect x="334" y="258" width="8" height="12"/>
     <rect x="344" y="258" width="8" height="12"/><rect x="354" y="258" width="8" height="12"/>
     <rect x="364" y="258" width="8" height="12"/>
@@ -78,7 +89,7 @@
   <text x="86" y="426" fill="#2E2B26" font-size="13" font-weight="bold">XBOX WIRELESS CONTROLLER</text>
   <text x="86" y="446" fill="#6F6A5E" font-size="12">蓝牙 / 1 分钟前 / 系统报告</text>
   <text x="382" y="430" text-anchor="end" fill="#2E2B26" font-size="24" font-weight="bold">18%</text>
-  <g fill="#D98A2B">
+  <g fill="#B86512">
     <rect x="324" y="442" width="8" height="12"/>
   </g>
   <g fill="#C9C1AE">
@@ -98,7 +109,7 @@
   <text x="86" y="518" fill="#2E2B26" font-size="13" font-weight="bold">SONY WH-1000XM5</text>
   <text x="86" y="538" fill="#6F6A5E" font-size="12">蓝牙 / 充电中 / 系统报告</text>
   <text x="382" y="522" text-anchor="end" fill="#2E2B26" font-size="24" font-weight="bold">35%</text>
-  <g fill="#4F8A5B">
+  <g fill="#A68414">
     <rect x="324" y="534" width="8" height="12"/><rect x="334" y="534" width="8" height="12"/>
     <rect x="344" y="534" width="8" height="12"/>
   </g>
@@ -114,11 +125,16 @@
   <rect x="326" y="604" width="74" height="28" fill="#E3DCCB" stroke="#2E2B26" stroke-width="2"/>
   <text x="363" y="623" text-anchor="middle" fill="#2E2B26" font-size="12" font-weight="bold">诊断</text>
 
-  <!-- tray -->
-  <rect x="356" y="646" width="28" height="20" fill="#F4EFE4" stroke="#2E2B26" stroke-width="2"/>
-  <rect x="360" y="650" width="4" height="12" fill="#C8443C"/>
-  <rect x="366" y="650" width="4" height="12" fill="#C8443C"/>
-  <rect x="372" y="650" width="4" height="12" fill="#C8443C"/>
-  <rect x="378" y="650" width="2" height="12" fill="#C9C1AE"/>
-  <rect x="384" y="652" width="4" height="8" fill="#2E2B26"/>
+  <!-- tray: same pixel battery map, one orange cell for a low reading -->
+  <g transform="translate(360,645)">
+    <rect x="2" y="0" width="10" height="1" fill="#2E2B26"/>
+    <rect x="2" y="0" width="1" height="10" fill="#2E2B26"/>
+    <rect x="11" y="0" width="1" height="10" fill="#2E2B26"/>
+    <rect x="2" y="9" width="10" height="1" fill="#2E2B26"/>
+    <rect x="3" y="1" width="8" height="8" fill="#F4EFE4"/>
+    <rect x="12" y="3" width="2" height="4" fill="#2E2B26"/>
+    <rect x="3" y="2" width="2" height="6" fill="#B86512"/>
+    <rect x="6" y="2" width="2" height="6" fill="#C9C1AE"/>
+    <rect x="9" y="2" width="2" height="6" fill="#C9C1AE"/>
+  </g>
 </svg>

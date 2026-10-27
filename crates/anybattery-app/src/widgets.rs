@@ -145,8 +145,8 @@ pub fn device_card(ui: &mut Ui, p: &Palette, device: &DeviceSnapshot, now: u64) 
 
     // The percentage label is the true target value; only the cell fill eases.
     match device.battery {
-        BatteryReading::Percent { level, charging } => {
-            let color = theme::battery_color(*p, level, charging == Some(true));
+        BatteryReading::Percent { level, .. } => {
+            let color = theme::battery_color_for_level(*p, level);
             painter.text(
                 Pos2::new(right, rect.top() + 24.0),
                 Align2::RIGHT_CENTER,
@@ -194,7 +194,7 @@ pub fn device_card(ui: &mut Ui, p: &Palette, device: &DeviceSnapshot, now: u64) 
             painter.text(
                 Pos2::new(right, rect.top() + 50.0),
                 Align2::RIGHT_CENTER,
-                "NO DATA",
+                "无电量",
                 FontId::new(12.0, FontFamily::Proportional),
                 p.tertiary,
             );
@@ -391,6 +391,78 @@ pub enum Glyph {
     Refresh,
     Settings,
     Back,
+    Minimize,
+    Maximize,
+    Restore,
+    Close,
+}
+
+pub const TITLEBAR_HEIGHT: f32 = 40.0;
+pub const CAPTION_BUTTON_SIZE: f32 = 30.0;
+const CAPTION_BUTTON_GAP: f32 = 4.0;
+const CAPTION_RIGHT_MARGIN: f32 = 8.0;
+
+#[derive(Clone, Copy)]
+pub struct CaptionButtonLayout {
+    pub minimize: Rect,
+    pub maximize: Rect,
+    pub close: Rect,
+}
+
+impl CaptionButtonLayout {
+    pub fn right_edge(self) -> f32 {
+        self.minimize.left()
+    }
+}
+
+/// Square caption buttons, laid out from the right edge of the custom title bar.
+pub fn caption_button_layout(bar: Rect) -> CaptionButtonLayout {
+    let top = bar.center().y - CAPTION_BUTTON_SIZE / 2.0;
+    let size = vec2(CAPTION_BUTTON_SIZE, CAPTION_BUTTON_SIZE);
+    let close_left = bar.right() - CAPTION_RIGHT_MARGIN - CAPTION_BUTTON_SIZE;
+    let maximize_left = close_left - CAPTION_BUTTON_GAP - CAPTION_BUTTON_SIZE;
+    let minimize_left = maximize_left - CAPTION_BUTTON_GAP - CAPTION_BUTTON_SIZE;
+    CaptionButtonLayout {
+        minimize: Rect::from_min_size(Pos2::new(minimize_left, top), size),
+        maximize: Rect::from_min_size(Pos2::new(maximize_left, top), size),
+        close: Rect::from_min_size(Pos2::new(close_left, top), size),
+    }
+}
+
+/// A caption button at an explicit rectangle. Kept separate from [`icon_button`] because the
+/// title bar owns its own row and the close button needs a destructive hover colour.
+pub fn caption_button(
+    ui: &mut Ui,
+    p: &Palette,
+    rect: Rect,
+    glyph: Glyph,
+    tooltip: &str,
+    destructive: bool,
+) -> Response {
+    let rect = theme::snap_rect(ui.ctx().pixels_per_point(), rect);
+    let response = ui.interact(rect, Id::new(("caption", tooltip)), Sense::click());
+    let hover = ui.ctx().animate_bool(response.id, response.hovered());
+    let pressed = response.is_pointer_button_down_on();
+    let hover_fill = if destructive { p.red.gamma_multiply(0.85) } else { p.hover };
+    let fill = if pressed {
+        Some(if destructive { p.red } else { p.accent })
+    } else if hover > 0.0 {
+        Some(theme::lerp_color(Color32::TRANSPARENT, hover_fill, hover))
+    } else {
+        None
+    };
+    if let Some(fill) = fill {
+        icons::pixel_frame(ui.painter(), rect, fill, p.card_border);
+    }
+    let color = if pressed || (destructive && hover > 0.25) {
+        p.on_accent
+    } else {
+        theme::lerp_color(p.secondary, p.text, hover)
+    };
+    draw_glyph(ui.painter(), rect, glyph, color);
+    response
+        .on_hover_text(tooltip)
+        .on_hover_cursor(CursorIcon::PointingHand)
 }
 
 pub fn icon_button(ui: &mut Ui, p: &Palette, glyph: Glyph, tooltip: &str) -> Response {
@@ -411,7 +483,10 @@ pub fn icon_button(ui: &mut Ui, p: &Palette, glyph: Glyph, tooltip: &str) -> Res
 
 /// Refresh control: the glyph steps while a scan is running and settles as soon as it stops.
 pub fn refresh_button(ui: &mut Ui, p: &Palette, scanning: bool, animations: bool) -> Response {
-    let (rect, response) = ui.allocate_exact_size(vec2(30.0, 28.0), Sense::click());
+    // While scanning the control is a status indicator, not a button: no click sense and no
+    // pointing-hand cursor, so it cannot promise an action that intentionally does nothing.
+    let sense = if scanning { Sense::hover() } else { Sense::click() };
+    let (rect, response) = ui.allocate_exact_size(vec2(30.0, 28.0), sense);
     let rect = theme::snap_rect(ui.ctx().pixels_per_point(), rect);
     let hover = ui.ctx().animate_bool(response.id.with("hover"), response.hovered());
     if hover > 0.0 {
@@ -448,9 +523,12 @@ pub fn refresh_button(ui: &mut Ui, p: &Palette, scanning: bool, animations: bool
     } else {
         draw_glyph(painter, rect, Glyph::Refresh, color);
     }
-    response
-        .on_hover_text(if scanning { "正在扫描…" } else { "立即刷新" })
-        .on_hover_cursor(CursorIcon::PointingHand)
+    let response = response.on_hover_text(if scanning { "正在扫描…" } else { "立即刷新" });
+    if scanning {
+        response
+    } else {
+        response.on_hover_cursor(CursorIcon::PointingHand)
+    }
 }
 
 fn draw_glyph(painter: &egui::Painter, rect: Rect, glyph: Glyph, color: Color32) {
@@ -478,6 +556,44 @@ fn draw_glyph(painter: &egui::Painter, rect: Rect, glyph: Glyph, color: Color32)
         Glyph::Back => {
             painter.line_segment([Pos2::new(c.x - 2.0, c.y - 6.0), Pos2::new(c.x - 8.0, c.y)], stroke);
             painter.line_segment([Pos2::new(c.x - 8.0, c.y), Pos2::new(c.x - 2.0, c.y + 6.0)], stroke);
+        }
+        Glyph::Minimize => {
+            painter.line_segment(
+                [Pos2::new(c.x - 5.0, c.y + 4.0), Pos2::new(c.x + 5.0, c.y + 4.0)],
+                stroke,
+            );
+        }
+        Glyph::Maximize => {
+            painter.rect_stroke(
+                Rect::from_center_size(c, vec2(12.0, 12.0)),
+                CornerRadius::ZERO,
+                stroke,
+                StrokeKind::Inside,
+            );
+        }
+        Glyph::Restore => {
+            painter.rect_stroke(
+                Rect::from_center_size(c + vec2(-1.5, -1.5), vec2(10.0, 10.0)),
+                CornerRadius::ZERO,
+                Stroke::new(1.5, color),
+                StrokeKind::Inside,
+            );
+            painter.rect_stroke(
+                Rect::from_center_size(c + vec2(1.5, 1.5), vec2(10.0, 10.0)),
+                CornerRadius::ZERO,
+                stroke,
+                StrokeKind::Inside,
+            );
+        }
+        Glyph::Close => {
+            painter.line_segment(
+                [Pos2::new(c.x - 5.0, c.y - 5.0), Pos2::new(c.x + 5.0, c.y + 5.0)],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(c.x + 5.0, c.y - 5.0), Pos2::new(c.x - 5.0, c.y + 5.0)],
+                stroke,
+            );
         }
     }
 }
@@ -547,16 +663,39 @@ pub fn group(ui: &mut Ui, p: &Palette, add: impl FnOnce(&mut Ui)) {
 }
 
 pub fn pill_button(ui: &mut Ui, p: &Palette, text: &str, selected: bool) -> Response {
-    let fill = if selected { p.accent } else { p.control };
-    let color = if selected { p.on_accent } else { p.text };
-    ui.add(
+    pill_button_enabled(ui, p, text, selected, true)
+}
+
+/// Pill button with an explicit disabled state for actions that are intentionally inert while
+/// a scan is running. Disabled buttons keep their muted text and the normal arrow cursor.
+pub fn pill_button_enabled(
+    ui: &mut Ui,
+    p: &Palette,
+    text: &str,
+    selected: bool,
+    enabled: bool,
+) -> Response {
+    let fill = if selected && enabled { p.accent } else { p.control };
+    let color = if !enabled {
+        p.tertiary
+    } else if selected {
+        p.on_accent
+    } else {
+        p.text
+    };
+    let response = ui.add_enabled(
+        enabled,
         egui::Button::new(theme::rich(text, 12.0, color, selected))
             .fill(fill)
             .stroke(Stroke::new(2.0, p.card_border))
             .corner_radius(CornerRadius::ZERO)
             .min_size(vec2(0.0, 28.0)),
-    )
-    .on_hover_cursor(CursorIcon::PointingHand)
+    );
+    if enabled {
+        response.on_hover_cursor(CursorIcon::PointingHand)
+    } else {
+        response
+    }
 }
 
 /// Footer: one natural-reading line for the interval and the freshness of the last scan.
@@ -661,5 +800,27 @@ mod tests {
         assert_eq!(scan_age_text(None, false), "等待首次扫描");
         assert_eq!(scan_age_text(None, true), "正在扫描…");
         assert_eq!(scan_age_text(Some(Instant::now()), false), "刚刚刷新");
+    }
+}
+
+#[cfg(test)]
+mod titlebar_tests {
+    use super::*;
+
+    #[test]
+    fn caption_buttons_fit_the_minimum_width_without_overlap() {
+        for width in [380.0, 430.0] {
+            let bar = Rect::from_min_size(Pos2::new(0.0, 2.0), vec2(width - 4.0, 38.0));
+            let layout = caption_button_layout(bar);
+            for button in [layout.minimize, layout.maximize, layout.close] {
+                assert_eq!(button.width(), CAPTION_BUTTON_SIZE);
+                assert_eq!(button.height(), CAPTION_BUTTON_SIZE);
+                assert!(bar.contains_rect(button), "button outside title bar at {width}");
+            }
+            assert!(layout.minimize.right() < layout.maximize.left());
+            assert!(layout.maximize.right() < layout.close.left());
+            assert_eq!(layout.close.right(), bar.right() - 8.0);
+            assert!(layout.right_edge() - 6.0 > 0.0);
+        }
     }
 }

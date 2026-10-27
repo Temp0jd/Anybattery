@@ -185,16 +185,51 @@ pub fn rich(value: impl Into<String>, size: f32, color: Color32, bold: bool) -> 
     egui::RichText::new(value.into()).size(size).color(color).family(family)
 }
 
-pub fn battery_color(p: Palette, level: u8, charging: bool) -> Color32 {
-    if charging {
-        p.green
-    } else if level <= 10 {
-        p.red
-    } else if level <= 20 {
-        p.orange
-    } else {
-        p.accent
+/// Five semantic battery tiers. The boundaries are the single source for card cells and the
+/// dynamic tray icon; charging never changes the tier, it only adds a bolt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BatteryTier {
+    Critical,
+    Low,
+    Medium,
+    High,
+    Full,
+}
+
+pub fn battery_tier(level: u8) -> BatteryTier {
+    match level {
+        0..=10 => BatteryTier::Critical,
+        11..=20 => BatteryTier::Low,
+        21..=50 => BatteryTier::Medium,
+        51..=80 => BatteryTier::High,
+        _ => BatteryTier::Full,
     }
+}
+
+/// Tier colours are chosen separately for the light and dark card backgrounds so each is
+/// distinguishable and keeps at least 3:1 contrast. The dynamic tray icon uses the light set.
+pub fn battery_tier_color(p: Palette, tier: BatteryTier) -> Color32 {
+    if p.dark {
+        match tier {
+            BatteryTier::Critical => Color32::from_rgb(230, 102, 92),
+            BatteryTier::Low => Color32::from_rgb(235, 168, 84),
+            BatteryTier::Medium => Color32::from_rgb(229, 205, 94),
+            BatteryTier::High => Color32::from_rgb(166, 188, 92),
+            BatteryTier::Full => Color32::from_rgb(124, 184, 132),
+        }
+    } else {
+        match tier {
+            BatteryTier::Critical => Color32::from_rgb(174, 52, 45),
+            BatteryTier::Low => Color32::from_rgb(184, 101, 18),
+            BatteryTier::Medium => Color32::from_rgb(166, 132, 20),
+            BatteryTier::High => Color32::from_rgb(104, 124, 36),
+            BatteryTier::Full => Color32::from_rgb(79, 138, 91),
+        }
+    }
+}
+
+pub fn battery_color_for_level(p: Palette, level: u8) -> Color32 {
+    battery_tier_color(p, battery_tier(level))
 }
 
 pub fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
@@ -253,6 +288,74 @@ mod tests {
             ] {
                 let ratio = contrast(fg, bg);
                 assert!(ratio >= 4.5, "contrast {:.2} below 4.5 (dark={})", ratio, dark);
+            }
+        }
+    }
+
+    #[test]
+    fn battery_tiers_cover_the_documented_boundaries() {
+        for level in [0, 1, 10] {
+            assert_eq!(battery_tier(level), BatteryTier::Critical, "level {level}");
+        }
+        for level in [11, 15, 20] {
+            assert_eq!(battery_tier(level), BatteryTier::Low, "level {level}");
+        }
+        for level in [21, 35, 50] {
+            assert_eq!(battery_tier(level), BatteryTier::Medium, "level {level}");
+        }
+        for level in [51, 65, 80] {
+            assert_eq!(battery_tier(level), BatteryTier::High, "level {level}");
+        }
+        for level in [81, 100, 101, 255] {
+            assert_eq!(battery_tier(level), BatteryTier::Full, "level {level}");
+        }
+    }
+
+    #[test]
+    fn battery_tiers_have_five_distinct_readable_colours() {
+        use std::collections::HashSet;
+
+        let tiers = [
+            BatteryTier::Critical,
+            BatteryTier::Low,
+            BatteryTier::Medium,
+            BatteryTier::High,
+            BatteryTier::Full,
+        ];
+        for dark in [false, true] {
+            let p = palette(dark);
+            let mut colours = HashSet::new();
+            for tier in tiers {
+                let colour = battery_tier_color(p, tier);
+                assert!(
+                    contrast(colour, p.card) >= 3.0,
+                    "{tier:?} on {} card has contrast {:.2}",
+                    if dark { "dark" } else { "light" },
+                    contrast(colour, p.card)
+                );
+                assert!(colours.insert((colour.r(), colour.g(), colour.b())), "{tier:?} duplicates a colour");
+            }
+            assert_eq!(colours.len(), 5);
+        }
+    }
+
+    #[test]
+    fn level_lookup_uses_the_same_tier_helper() {
+        for dark in [false, true] {
+            let p = palette(dark);
+            for (level, tier) in [
+                (0, BatteryTier::Critical),
+                (10, BatteryTier::Critical),
+                (11, BatteryTier::Low),
+                (20, BatteryTier::Low),
+                (21, BatteryTier::Medium),
+                (50, BatteryTier::Medium),
+                (51, BatteryTier::High),
+                (80, BatteryTier::High),
+                (81, BatteryTier::Full),
+                (100, BatteryTier::Full),
+            ] {
+                assert_eq!(battery_color_for_level(p, level), battery_tier_color(p, tier));
             }
         }
     }

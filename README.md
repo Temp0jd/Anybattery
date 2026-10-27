@@ -2,7 +2,7 @@
 
 Windows 10/11 的 2.4G / 蓝牙设备电量托盘工具。Rust 编写，单 exe，只读，不装驱动，不需要管理员权限。
 
-![AnyBattery UI](docs/ui-mockup-pixel.png)
+![AnyBattery 像素风界面：自绘标题栏、像素电池图标与五档电量配色](docs/ui-mockup-pixel.png)
 
 ## 下载
 
@@ -11,41 +11,219 @@ Windows 10/11 的 2.4G / 蓝牙设备电量托盘工具。Rust 编写，单 exe�
 - 单文件，无安装器
 - 静态 CRT，不依赖 WebView2 / VC++ Redistributable
 - 内置 Fusion Pixel 12px 中文像素字体
-- Windows 原生标题栏与窗口按钮
+- 应用自绘像素标题栏与窗口按钮：最小化 / 最大化/还原 / 关闭到托盘
+- 像素电池应用图标：exe、窗口、标题栏与托盘默认图标同源
 - 未签名，SmartScreen 可能提示“未知发布者”
 
-## 当前能力
+## 设备支持矩阵
 
-| 类别 | 方式 | 状态 |
-|---|---|---|
-| 蓝牙经典 / BLE 设备 | Windows PnP 电量属性（BTHENUM / BTHLE） | ✅ |
-| 标准 HID 电量 | Battery Strength / State of Charge 等 usage | ✅ |
-| Xbox 系手柄 | `Windows.Gaming.Input.RawGameController` 电池报告 | ✅ |
-| Steam Controller（2025 / Puck） | HID 输入报告 `0x43` | ✅ |
-| PlayStation DualSense / DualShock 4 | HID 输入报告 | ✅ |
-| Nintendo Switch Pro / Joy-Con | HID 输入报告 | ✅ |
-| 8BitDo（部分型号，D-input / XInput） | HID 输入报告 | ✅ |
-| 雷蛇鼠标 / 键盘 / 耳机 | 90 字节 Feature 报文，型号表 | ✅ / 🟡 |
-| 雷蛇耳机 PA 协议 | 64 字节 `P A` / `P I` 报文 | 🟡 |
-| 罗技 HID++ 2.0（Unifying / Lightspeed / Bolt） | Feature 报文，1–6 号设备槽 | ✅ |
-| CompX 系（Pulsar / ATK / VXE / Hitscan） | 17 字节 / 64 字节 Output 报文 | ✅ |
-| VAXEE / ZYGEN | Feature 报文 | ✅ |
-| Endgame Gear | Feature 报文 | ✅ |
-| Nordic nRF | Feature 报文 | ✅ |
-| SteelSeries / HyperX / Corsair / ASUS ROG / Keychron / Lofree / NZXT | 厂商 Feature / Output 报文 | 🟡 严格校验 |
+> 最后更新：2026-10-27。本表以当前工作树代码为准，不把上游项目的 “Verified” 直接当成 AnyBattery 的本机验证。设备能否被 Windows 枚举，不等于能读取电量；未匹配到电量协议的设备默认隐藏，打开“显示无电池设备”后才会以“未找到电量协议”列出。逐项来源、fixtures 和未决项见 [`docs/protocol-research/`](docs/protocol-research/)。
 
-> ✅ = 已内置，并对报文头、长度、数值范围做校验；🟡 = 协议来自公开资料/社区，未逐型号真机验证，只在回复完全匹配时显示。是否适用于你的具体型号，以诊断页结果为准。
+状态含义：
 
-尚未实现：BLE GATT Battery Service 主动读取、自定义 JSON 协议导入界面、系统 Toast 通知、单实例限制、代码签名，以及 Jieli / DARKRIM、Steam Controller 2015 等协议。未识别设备默认不显示；在设置中打开“显示无电池设备”后会列出，并如实标注“未匹配电量协议”，不会猜测百分比。
+| 标记 | 含义 |
+|---|---|
+| ✅ 本机验证 | 有本机真实扫描或官方软件校准证据；会注明证据文件或读数。 |
+| 🟡 社区协议 | 有代码路由和严格 parser/fixtures，但未在本机对应型号上验证；标“脚本传输测试”表示生产 session 路径已有脚本驱动测试、仍无对应真机；不代表所有同 VID:PID 设备都兼容。 |
+| 🧪 实验/运行时修复 | 有路由，但存在会话、传输、接口、硬件门或 parser/证据缺口；不得当作稳定可用。 |
+| ⚪ 系统/标准 | 依赖 Windows PnP、标准 HID 描述符或 WGI 实际暴露；设备不暴露就没有电量。 |
+| ❌ 未支持/已排除 | 已知的重要排除项，不可能穷举世界上所有设备。 |
+
+补充约定：
+
+- “充电未知”与“未充电”不同：只有协议明确返回 0/放电时才写“未充电”，没有字节或状态冲突时写“未知”。
+- 同一 VID:PID 可能被不同厂商/固件复用；本表只承诺代码中列出的 PID、接口、usage 和报文形状，不承诺“同 VID:PID 的所有设备”。
+- 矩阵中的 🟡 不是“稳定支持”，🧪 不是“已经修好”；发布说明必须沿用这里的等级。
+- 本表状态是证据等级，不直接等同 UI 的“已验证 / 社区协议 / 系统报告”标签；例如 M618Air 的通用 1D57 路由在代码中仍保留 Community，但本行已有官方校准和实扫证据。
+
+### Windows 系统与标准接口
+
+| 设备 / 接口 | VID:PID 或条件 | 协议 / 报文 | 电量 / 充电 | 状态 | 限制 / 证据 |
+|---|---|---|---|---|---|
+| Windows 蓝牙 PnP（经典/BLE） | BTHENUM / BTHLE 任意设备 | `DEVPKEY_BLUETOOTH_BATTERY` PnP 属性 | 1–100% / 未知 | ⚪ 系统/标准 | 纯只读系统属性；设备未暴露或值为 0 时不显示；不做主动 GATT。 |
+| 蓝牙 HFP / 服务节点合并 | 同一 ContainerId | BTHENUM 服务节点电量并入根卡 | 继承服务节点电量 / 未知 | ⚪ 系统/标准 | 零、空、全零 ContainerId 不合并；多个经典根只允许唯一经典根接收 HFP 数据；OPPO 已验证，其他型号未逐台验证。 |
+| OPPO Enco X3 | BTHENUM `DEV_407218C8A7BC`（系统节点，无公开 VID:PID） | Windows PnP + HFP ContainerId 合并 | 实测 90% / 100%；充电未知 | ✅ 本机验证 | `.pi/diag-hfp-merge.txt` 显示 100%，`.pi/diag-final-integration.txt` 显示 90%；HFP 单卡；当前 123 项 Windows 测试通过。 |
+| Zero 1 | BTHLE `DEV_CC3D601F1B0C` | Windows BLE PnP | 实测 46%；充电未知 | ✅ 本机验证 | `.pi/diag-final-integration.txt`；GATT 服务节点归并到根卡；仍是 PnP 属性，不是主动 GATT。 |
+| 标准 HID Battery System | usage `0x0085:0x0064`、`0x0085:0x0065`，充电/放电 `0x44/0x45` | Feature/Input value | 百分比 / 充电、放电标志 | ⚪ 系统/标准 | 不再接受 `0x66` 或 `0x0001` 猜百分比；依赖设备描述符和 logical min/max。 |
+| 标准 HID Battery Strength / Digitizer | `0x0006:0x0020`、`0x000D:0x003B` | Feature/Input value | 百分比 / 无充电位则未知 | ⚪ 系统/标准 | 依赖描述符；没有标准充电 usage 时保持未知。 |
+| Xbox / GameSir / FlyDigi 等游戏手柄 | 任意 `RawGameController` | `Windows.Gaming.Input` 电池报告 | mWh 比例 / 系统状态 | ⚪ 系统/标准 | 依赖系统实际提供 `TryGetBatteryReport`；Transport 固定 USB 是展示限制；可能与 HID 卡重复。 |
+| BLE GATT Battery Service 主动读取 | 任意 BLE `0x180F/0x2A19` | 未实现 | — | ❌ 未支持/已排除 | 主轮询不做主动连接；需要独立异步 Watcher，避免音频/射频冲突。 |
+
+### 手柄
+
+| 型号 / 型号组 | VID:PID / 接口 | 协议 / 报文 | 电量 / 充电 | 状态 | 限制 / 证据 |
+|---|---|---|---|---|---|
+| Steam Controller 2025（USB / 蓝牙） | `28DE:1302` / `28DE:1303` | HID input `0x43`，约 5 秒监听窗口 | 百分比 / `0x43` 状态位 | 🟡 社区协议 | 代码内 Verified 来自上游；本机未验证。 |
+| Steam Controller Puck（Proteus / Nereid） | `28DE:1304` / `28DE:1305`；interface 2–5 | HID input `0x43` | 百分比 / 状态位 | 🟡 社区协议 | Puck 要求 vendor collection（`usage_page >= 0xFF00`，不限定 usage）或 gamepad collection（`usage_page=1, usage=5`）；本机未验证。 |
+| Sony DualShock 4 | `054C:05C4` / `054C:09CC` / `054C:05C5` / `054C:0BA0` | input `0x01` / `0x11`，USB byte30、蓝牙 byte32 | 百分比 / 线缆位 | 🟡 社区协议 | `11` 为满电，`14/15` 保持未知；仅监听，不触发厂商 feature。 |
+| Sony DualSense | `054C:0CE6` | input `0x01` / `0x31`，USB byte53、蓝牙 byte54 | 百分比 / 高半字节状态 | 🟡 社区协议 | 低半字节 `0x0C` 表示不报告；高半字节 2 为充满。 |
+| Sony DualSense Edge | `054C:0DF2` | 同 DualSense | 百分比 / 状态 | 🟡 社区协议 | 本机未验证。 |
+| Nintendo Joy-Con (L)/(R) / Switch Pro | `057E:2006` / `057E:2007` / `057E:2009` | 蓝牙 input `0x21` / `0x30` / `0x31` | 8 档换算百分比 / 充电位 | 🟡 社区协议 | 只处理蓝牙路径；USB 不读；未实现完整模式子命令回退。 |
+| 8BitDo SF30 Pro | `2DC8:6000` / `2DC8:6100` | input `0x01`（蓝牙）/ `0x04`（USB），byte14 | 百分比 / bit7 充电 | 🟡 社区协议 | 上游格式；本机未验证。 |
+| 8BitDo SN30 Pro | `2DC8:6001` / `2DC8:6101` | 同上 | 百分比 / bit7 充电 | 🟡 社区协议 | 上游格式；本机未验证。 |
+| 8BitDo Pro 2 | `2DC8:6003` / `2DC8:6006` | 同上 | 百分比 / bit7 充电 | 🟡 社区协议 | 上游格式；本机未验证。 |
+| 8BitDo Pro 3 | `2DC8:6009` | input `0x04`，byte14 | 百分比 / bit7 充电 | 🟡 社区协议 | 代码内 Verified 来自上游；本机未验证。 |
+| 8BitDo Ultimate 2 Wireless | `2DC8:6012` | 蓝牙 `0x01` / USB `0x04`，byte14 | 百分比 / bit7 充电 | 🟡 社区协议 | 型号表新增项；本机未验证。 |
+
+### Razer（雷蛇）
+
+> 口径：Razer 共 81 个 PID = `razer_name` 的 76 个 90B PID + 3 个 PA PID + `0528` + `0557`（仅排除）。`razer_name` 有 45 个唯一型号名 = 43 个 90B 型号 + 2 个 PA 型号；若把 `0528` 与 `0557` 也算作含 PID 的型号行，则为 47 行（其中 `0557` 只排除），另有 1 个无 PID 的兜底行。不要把 45 / 47 / 81 混用。
+
+Razer 不是全系支持。下列型号必须同时命中 PID、vendor collection、报文长度/形状才会读取；未知型号、朋友设备等没有型号证据时不承诺。
+
+#### 90 字节通用 Feature（class `0x07`，cmd `0x80` 读电量、`0x84` 读充电）
+
+代码先按表内首选 TID 查询，再依次尝试 `0x1F/0x9F/0x3F/0xFF/0x08`。电量按 `raw * 100 / 255` 四舍五入；充电查询失败时保持未知。下表同一行的多个 PID 是代码中同型号的公开 PID 合并，未逐 PID 验证连接模式。
+
+| 型号 | VID:PID | 首选 TID | 电量 / 充电 | 状态 | 限制 / 证据 |
+|---|---|---|---|---|---|
+| Razer DeathStalker V2 Pro | `1532:0290` / `1532:0292` | `0x9F` / `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证；Synapse 占用时可能超时。 |
+| Razer DeathStalker V2 Pro TKL | `1532:0296` / `1532:0298` | `0x9F` / `0x1F` | 百分比 / 可选 | 🟡 社区协议 | `0296` 代码内 Verified 来自上游，不是本机验证。 |
+| Razer BlackWidow V3 Mini HyperSpeed | `1532:0271` / `1532:0258` | `0x9F` / `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
+| Razer BlackWidow V4 Mini HyperSpeed | `1532:02BA` / `1532:02B9` | `0x9F` / `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
+| Razer BlackWidow V4 Tenkeyless HyperSpeed | `1532:02D5` / `1532:02D7` | `0x9F` / `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
+| Razer BlackWidow V3 Pro | `1532:025A` / `1532:025C` | `0x3F` / `0x9F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
+| Razer Mouse Dock Pro | `1532:00A4` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 底座设备不一定代表鼠标电量；本机未验证。 |
+| Razer Naga Epic | `1532:001F` | `0xFF` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
+| Razer Mamba (2012) | `1532:0024` / `1532:0025` | `0xFF` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
+| Razer Ouroboros | `1532:0032` | `0xFF` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
+| Razer Naga Epic Chroma | `1532:003E` / `1532:003F` | `0xFF` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
+| Razer Mamba | `1532:0044` / `1532:0045` | `0xFF` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
+| Razer Lancehead | `1532:0059` / `1532:005A` | `0x3F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
+| Razer Atheris | `1532:0062` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
+| Razer Lancehead Wireless | `1532:006F` / `1532:0070` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
+| Razer Mamba Wireless | `1532:0072` / `1532:0073` | `0x3F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
+| Razer Pro Click | `1532:0077` / `1532:0080` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
+| Razer Viper Ultimate | `1532:007A` / `1532:007B` | `0xFF` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
+| Razer DeathAdder V2 Pro | `1532:007C` / `1532:007D` | `0x3F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
+| Razer Basilisk X HyperSpeed | `1532:0083` | `0xFF` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
+| Razer Basilisk Ultimate | `1532:0086` / `1532:0088` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
+| Razer Naga Pro | `1532:008F` / `1532:0090` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
+| Razer Orochi V2 | `1532:0094` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
+| Razer Pro Click Mini | `1532:009A` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
+| Razer DeathAdder V2 X HyperSpeed | `1532:009C` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
+| Razer Viper Mini SE | `1532:009E` / `1532:009F` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
+| Razer Viper V2 Pro | `1532:00A5` / `1532:00A6` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
+| Razer Naga V2 Pro | `1532:00A7` / `1532:00A8` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
+| Razer Basilisk V3 Pro | `1532:00AA` / `1532:00AB` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
+| Razer Cobra Pro | `1532:00AF` / `1532:00B0` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
+| Razer HyperPolling Dongle | `1532:00B3` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 是接收器/轮询器，不代表独立设备；本机未验证。 |
+| Razer Naga V2 HyperSpeed | `1532:00B4` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
+| Razer DeathAdder V3 Pro | `1532:00B6` / `1532:00B7` / `1532:00C2` / `1532:00C3` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
+| Razer Viper V3 HyperSpeed | `1532:00B8` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
+| Razer Basilisk V3 X HyperSpeed | `1532:00B9` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
+| Razer DeathAdder V4 Pro | `1532:00BE` / `1532:00BF` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | `00BF` 代码内 Verified 来自上游，不是本机验证。 |
+| Razer Viper V3 Pro | `1532:00C0` / `1532:00C1` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
+| Razer DeathAdder V3 HyperSpeed | `1532:00C4` / `1532:00C5` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
+| Razer Pro Click V2 Vertical Edition | `1532:00C7` / `1532:00C8` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
+| Razer Basilisk V3 Pro 35K | `1532:00CC` / `1532:00CD` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
+| Razer Pro Click V2 | `1532:00D0` / `1532:00D1` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
+| Razer Basilisk Mobile | `1532:00D3` / `1532:00D4` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
+| Razer Basilisk V3 Pro 35K Phantom Green | `1532:00D6` / `1532:00D7` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
+
+#### 专用 64 字节 / PA 路径与排除
+
+| 型号 | VID:PID / 接口 | 协议 / 报文 | 电量 / 充电 | 状态 | 限制 / 证据 |
+|---|---|---|---|---|---|
+| Razer BlackShark V2 Pro (2020) | `1532:0528`；`FF00:0001`，feature 64B | 64B `0xFF`；请求 `FF 0A 00 FD 04 12 F1 02 05`；state 在 11，mV 在 12–13，level 在 14 | 有 / state `09` 充电，`01/02/03/06` 未充电，其他未知；充电中电量仅粗略参考 | 🟡 社区协议 | 仅 fixture；本机未验证；通用 90B 和 PA 路径明确拒绝 0528；上游提示充电中自报值可能跳变。 |
+| Razer BlackShark V2 Pro (2023) | `1532:0555` / `1532:0556`；64B vendor collection（`FF00` / `FF14`） | PA `P A` / `P I`，0x21 电量、0x2A 充电 | 有 / 有 | 🟡 社区协议（脚本传输测试） | 先 drain；每次尝试先 remote-on，BlackShark 3 次重试；同一句柄读电量与充电，最后 remote-off 恢复会话；`0555`/`0556` 均为 Community，生产 session 有脚本传输测试，无对应真机。 |
+| Razer Barracuda Pro (2.4 GHz) | `1532:053A`；64B vendor collection（`FF00`） | PA，report `0x01`，0x21/0x2A | 有 / 有 | 🟡 社区协议（脚本传输测试） | 先 drain；每次尝试先 remote-on，Barracuda 4 次重试；同一句柄读电量与充电，最后 remote-off 恢复会话；生产 session 有脚本传输测试，无对应真机。 |
+| Razer 未列入 PID 的无线设备 | 产品名含 `wireless`、`hyperspeed`、`receiver`、`dongle`、`blackshark`、`barracuda` | 90B 兜底，置信度 Unverified | 成功才有 | 🧪 实验/运行时修复 | 朋友设备型号未知，不承诺；只有产品名命中才尝试，失败即隐藏。 |
+| Razer BlackShark V2 X USB（有线） | `1532:0557` | 不进入 90B/PA | — | ❌ 未支持/已排除 | 公开 USB ID 是有线音频设备，不是 BlackShark V2 Pro 2023；代码已显式跳过。 |
+
+### Logitech（罗技）
+
+| 设备 / 型号组 | VID:PID / 接口 | 协议 / 报文 | 电量 / 充电 | 状态 | 限制 / 证据 |
+|---|---|---|---|---|---|
+| Logitech HID++ 2.0 设备 | `046D` 任意 HID++ vendor collection；slot `0xFF` 或接收器 1–6 | HID++ 2.0 features `0x1000/0x1001/0x1004/0x1F20`，short 7 / long 20 | 百分比或电压曲线 / `0x1000`/`0x1004`：status 0=未充、1–3=充、4–7=未知；`0x1001`：bit7=0 未充电，bit7=1 时低三位 0/1=充、2=未充、3–7=未知 | 🟡 社区协议 | 代码内 Verified 来自上游；本机未验证。没有 HID++ 1.0 回退；只打开一个 path，短/长 collection 未配对；`0x1F20` 电压曲线与 Linux 冲突；`0x1004` 无 SoC capability 回退未实现；未做 unit ID 跨接收器/有线合并。 |
+| Logitech 已知接收器 PID | `046D:C548`、`046D:C52B`、`046D:C532`、`046D:C52F`、`046D:C518`、`046D:C51A`、`046D:C51B`、`046D:C521`、`046D:C525`、`046D:C526`、`046D:C52E`、`046D:C531`、`046D:C534`、`046D:C535`、`046D:C537`、`046D:C539`、`046D:C53A`、`046D:C53D`、`046D:C53F`、`046D:C541`、`046D:C545`、`046D:C547`、`046D:C54D` | HID++ 2.0，遍历 slot 1–6 | 同上 | 🟡 社区协议 | 23 个接收器 PID 全部列出；产品名还可用 receiver/unifying/lightspeed/bolt 兜底；空槽/离线可能等待超时。 |
+| Logitech HID++ 1.0 / 老设备 | `046D`，无 feature table | 未实现 | — | ❌ 未支持/已排除 | 没有 register `0x07/0x0D` 回退，老设备不会被识别。 |
+
+### CompX / VAXEE / Endgame / Nordic / ASUS / NZXT
+
+| 型号 / 型号组 | VID:PID / 接口 | 协议 / 报文 | 电量 / 充电 | 状态 | 限制 / 证据 |
+|---|---|---|---|---|---|
+| Pulsar X2 V2 Mini | `3554:F508`（2.4G）/ `3554:F507`（USB） | CompX 17B `08 04`，checksum `0x55-sum`；FF05 时 64B 兜底 | 17B：level `frame[6]`、充电 `frame[7]`；64B：level `reply[7]`、充电未知 | 🟡 社区协议 | 代码内 Verified 来自上游；本机未验证。 |
+| ATK VXE R1 SE+ | `3554:F58F`（USB）/ `373B:1085`（2.4G） | 同上 | 同上 | 🟡 社区协议 | 代码内 Verified 来自上游；本机未验证。 |
+| VXE R1 Pro Max | `3554:F58A`（2.4G）/ `3554:F58C`（USB） | 同上 | 同上 | 🟡 社区协议 | 代码内 Verified 来自上游；本机未验证。 |
+| Pulsar X2 CrazyLight Mini | `3710:5406`（2.4G）/ `3710:3414`（USB） | 同上 | 同上 | 🟡 社区协议 | 代码内 Verified 来自上游；本机未验证。 |
+| Hitscan Hyperlight | `3770:0200`（2.4G）/ `3770:0100`（USB） | 同上 | 同上 | 🟡 社区协议 | 代码内 Community；本机未验证。 |
+| VAXEE / ZYGEN | `3057` 任意，usage page `FF05`（任意 usage），feature 64B | feature `0E A5`；page `0x0B` 电量、page `0x10` 充电 | 电量 = raw `0..20` × 5；充电 0/1 | 🟡 社区协议 | 仅协议事实和 fixtures；本机未验证；没有按 PID 收窄。 |
+| Endgame Gear | `3367` 任意，usage `FF01`，feature 64B | feature `A1 B4`，level 在 16，mV 在 17–18 | 有电量 / 充电未知 | 🟡 社区协议 | 证据较弱；本机未验证。 |
+| Nordic nRF | `1915` 任意，usage `FFA0`，feature 32B | feature `05 15`，level 在 9 | 有电量 / 充电未知 | 🟡 社区协议 | 证据较弱；本机未验证。 |
+| ASUS ROG 无线鼠标 | `0B05` vendor collection，65B；步进 PID：`0B05:18E5`、`0B05:18E3`、`0B05:1960`、`0B05:195E`、`0B05:1A59`、`0B05:1A57`、`0B05:1908`、`0B05:1906`、`0B05:1949`、`0B05:1947` | `0x12 0x07` | level `offset+4`；步进 PID ×25%，其他 ≤100 直接；充电 `offset+9` | 🟡 社区协议 | 未按 PID/接口收窄；充电字节缺失时当前按未充电，是已知限制；本机未验证。 |
+| NZXT Lift Elite / 同族 | `1E71:2101` / `1E71:2129`，usage `FFCA:0001` | `4E 02 81 00 B0`，level LE 17–18，charge bit22 | 有 / 有 | 🟡 社区协议 | 上游协议；本机未验证。 |
+
+### OEM 鼠标：PixArt / MCHOSE / Delux
+
+> OEM 7 项代码审查与修复已确认，但没有因此升级 Verified：PixArt/MCHOSE 保持 🟡 社区协议，Delux M800 Pro 继续因 Windows MI_01 硬件门保持 🧪。MCHOSE 已按 caps 长度填充后截断（caps65）并在同一句柄处理 21/65 通道；A5 Pro Max 的多个 `0xFFFF` collection 按 container 分组、usage 0 优先、usage 1 仅作同容器 fallback。
+
+| 型号 | VID:PID / 接口 | 协议 / 报文 | 电量 / 充电 | 状态 | 限制 / 证据 |
+|---|---|---|---|---|---|
+| WLmouse Beast X Max (8K) | `36A7:A880`，`FFFF:0000`，feature 65B | PixArt/JM `00 ... 83`，回复 `A1/A2`，level raw[8]、charge raw[7] | 有 / 有 | 🟡 社区协议 | 上游声明实机，AnyBattery 未本机验证；A0/A3 帧拒绝。 |
+| WLmouse Beast X | `36A7:A887` | 同上 | 有 / 有 | 🟡 社区协议 | 接收器表，未确认；本机未验证。 |
+| WLmouse Beast X Mini Pro | `36A7:A868` | 同上 | 有 / 有 | 🟡 社区协议 | 接收器表，未确认；本机未验证。 |
+| LAMZU Maya X | `373E:001E`（8K）/ `373E:001C`（USB）；interface 2 | 同上 | 有 / 有 | 🟡 社区协议 | 上游声明实机，AnyBattery 未本机验证；只认 interface 2 的 `FFFF:0000`。 |
+| Attack Shark R5 Ultra | `373E:0046`（USB）/ `373E:0047`（2.4G）；产品名含 `attack shark` | 同上 | 有 / 有 | 🟡 社区协议 | bridge profile，不是硬件实测；本机未验证。 |
+| MCHOSE A5 Pro Max | `2023:F013`（1K）/ `2023:F015`（4K）/ `2023:F019`（USB）；产品名含 `mchose` | 同上；多 `0xFFFF` collection 按 container 分组，usage 0 优先，usage 1 仅同容器 fallback | 有 / 有 | 🟡 社区协议 | 分组修复已确认；issue 报告仅 1K 硬件确认，其余未试；本机未验证；不升 Verified。 |
+| MCHOSE M7 Ultra | `5253:1020`（2.4G）/ `5253:0031`（USB），`FF01:0001` | 反码 Feature，report `0x11` 21B / `0x12` 65B；caps 长度填充后截断，同句柄短/长通道；每次 GET 前重发 | level payload[9]、charge payload[10] | 🟡 社区协议 | 上游固件实测，AnyBattery 未本机验证；只按 PID 白名单；完整 handle 级 `SetFailed`/`GetFailed` 路由仍缺 fake-HID 端到端测试，需真机。 |
+| MCHOSE A5 V2 Ultra | `3837:100C`（2.4G）/ `3837:1101`（USB） | 同上 | 有 / 有 | 🟡 社区协议 | FerrisPulse 常量；本机未验证。 |
+| MCHOSE A7 V2 Ultra | `3837:100B`（2.4G） | 同上 | 有 / 有 | 🟡 社区协议 | 上游 issue；本机未验证。 |
+| Delux M800 Pro | `248A:5B2F`（2.4G）/ `248A:5B2E`（有线）；MI_01，feature 33B | Feature `0C 01 20 seq`，level raw[18]、charge raw[19] | 有 / 有 | 🧪 实验/运行时修复 | Windows 必须枚举出 MI_01 且 feature_len=33 才发送；无该 HID collection 时停止，不猜 raw USB；8 次有界重试；本机未验证。 |
+
+### 键盘与键鼠接收器
+
+| 型号 / 型号组 | VID:PID / 接口 | 协议 / 报文 | 电量 / 充电 | 状态 | 限制 / 证据 |
+|---|---|---|---|---|---|
+| AULA / 3554:FA09 2.4G 键盘接收器 | `3554:FA09`，`FF02:0002`，in/out 20B | 代码发送 `13 05 01` 身份查询，但 parser 只接受 `13 0A` 电量应答 | 成功才有 / 充电未知 | 🧪 实验/运行时修复 | 本机只枚举到接收器；最终扫描 5 个 collection 仅一张 unknown 卡、无重复；`0x05` 返回型号应答并拒绝，`0x4A` 多次无响应；不猜电量。 |
+| Keychron M5 / Ultra-Link 8K | `3434:D028`（接收器）/ `3434:D048`（有线），interface 4，64B Feature + Input | `B3 06` → `B4 06`，level byte20 | 有电量 / 充电未知 | 🟡 社区协议（脚本传输测试） | 仅 interface 4；同一句柄 Feature SET + `B4` Input；先 drain，最多 3 次、间隔 100ms、每次 500ms；生产 session 有脚本传输测试，无对应真机；设备类型仍标鼠标。 |
+| Lofree Hyzen | `388D:0025`，usage `FF1C:0092` | `04 00 00 01` 启动 → `1A` 查询 → `02` 结束；level reply[8] | 有电量 / 充电未知 | 🟡 社区协议 | 只支持 Hyzen 证据；未先查在线状态，离线返回 0 时可能被当 0%；本机未验证。 |
+
+### 耳机与其他外设
+
+| 型号 / 型号组 | VID:PID / 接口 | 协议 / 报文 | 电量 / 充电 | 状态 | 限制 / 证据 |
+|---|---|---|---|---|---|
+| SteelSeries Nova 7（离散档） | `1038:2202`、`1038:2206`、`1038:220A`、`1038:223A`、`1038:227A`、`1038:22A4`，usage `FFC0` | `B0` 回复；level reply[2] ×25 | 有 / reply[3] 01/02 为充电 | 🟡 社区协议 | 上游协议；本机未验证。 |
+| SteelSeries Nova 7（百分比） | `1038:22A1`、`1038:227E`、`1038:2258`、`1038:229E`、`1038:22AD`、`1038:22A9`、`1038:22A5`、`1038:22A7`，usage `FFC0` | `B0` 回复；level reply[2] | 有 / reply[3] 01/02 为充电 | 🟡 社区协议 | 上游协议；本机未验证。 |
+| SteelSeries Nova 5 | `1038:2232`、`1038:2253`，usage `FFC0` | `B0` 回复；离线 reply[1]=0x02；level reply[3] | 有 / reply[4]=1 为充电 | 🟡 社区协议 | 上游协议；本机未验证。 |
+| SteelSeries 通用 AA 鼠标 | `1038` 其他 PID，usage `FFC0` | 64B `AA 01` | level reply[1] / 充电未知 | 🧪 实验/运行时修复 | 代码内是 `Confidence::Unverified`；仅检查 `AA` 头、长度和 ≤100，无严格型号 fixtures；不得视为社区协议或稳定支持。 |
+| HyperX Cloud II Wireless / 同协议 | `03F0:0696` / `03F0:018B`，usage `FF90:0303` | 52B `06 FF BB 02`，充电 `06 FF BB 03` | level reply[7] / 有充电查询 | 🟡 社区协议 | 上游协议；本机未验证。 |
+| Corsair Dark Core RGB Pro SE | `1B1C:1B7F`，`FF42:0001` | bragi 65B，property `0x0F` | level raw LE / 充电未知 | 🟡 社区协议（脚本传输测试） | 只问 `0001` 通道；同一句柄先 drain，电量窗口 6 秒、总 deadline 7 秒；第二次相等才确认，不一致拒绝；生产 session 有脚本传输测试，无对应真机。 |
+| Corsair Virtuoso SE / XT | `1B1C:0A40` / `1B1C:0A3E` / `1B1C:0A64`，`FF42:0001` | bragi 64B，property `0x0F` 电量、`0x10` 充电 | 有 / 有 | 🟡 社区协议（脚本传输测试） | 同一句柄先 drain；`0A40` 依次 firmware → receiver heartbeat → headset heartbeat；电量窗口 6 秒、总 deadline 7 秒、二次相等确认后再读充电；生产 session 有脚本传输测试，无对应真机。 |
+
+### Beken / 1D57 2.4G
+
+| 型号 / 型号组 | VID:PID / 接口 | 协议 / 报文 | 电量 / 充电 | 状态 | 限制 / 证据 |
+|---|---|---|---|---|---|
+| DELUX M618Air（model `0x24`） | `1D57:FA60`，MI_02，`000A:0000`，input 5B | 被动 `03 24 40 01 <raw>`；官方 `0x4290b0 → 0x421b90` 档位映射 | raw `1/2/3/4-5/6-7/8..100` → `10/20/40/60/80/100`；state 01 按前版契约记为未充电（官方 handler 未解码充电位） | ✅ 本机验证 | 官方软件 raw6 显示 80%；`.pi/diag-final-integration.txt` 实扫 raw7 显示 80%，charging `Some(false)`，最终集成扫描 2.99 秒、30 秒硬超时内完成，devices=4/bluetooth=2/hid=9；当前 123 项 Windows 测试通过；state `02/03/80` 仍拒绝；名称保持中性。 |
+| 其他 1D57:FA60 / Beken 兼容设备 | `1D57:FA60`，MI_02，`000A:0000`，input 5B | 被动 `03 <id> 40 <state> <raw>` | `0x55` 直接；`0x10/0x85` ×10；其他直接；充电未知 | 🟡 社区协议 | 严格校验头、长度、range；不同 device ID 无品牌/型号承诺；`0x24` 只在 M618Air 证据上下文解释。 |
+
+### 未支持 / 已排除
+
+| 项目 | VID:PID 或范围 | 原因 | 状态 |
+|---|---|---|---|
+| Steam Controller 2015 | `28DE:1142` 等旧接收器 | 未实现旧协议；当前仅 2025/Puck 的 `0x43` | ❌ 未支持/已排除 |
+| Jieli / DARKRIM | 厂商私有 2.4G | 未实现；没有稳定的一手只读证据 | ❌ 未支持/已排除 |
+| Sony INZONE | `054C:0EC2` 等 | 未实现；现有 `054C` 路由只匹配 DS4/DualSense PID | ❌ 未支持/已排除 |
+| JBL | `0ECB:*` | 未实现 | ❌ 未支持/已排除 |
+| MCHOSE V9 Turbo+ 耳机 | `3837:600A` | 是 Input `0x55` 耳机协议，绝不能进入鼠标反码路由 | ❌ 未支持/已排除 |
+| HyperX 其他家族（Cloud III/III S/II Core/Alpha 2 等） | `03F0:*` 非 `0696/018B` | 未实现逐家族报文 | ❌ 未支持/已排除 |
+| SteelSeries Rival/Aerox 新协议 | `1038` 非 Nova 型号 | 未实现；通用 AA 只是未验证兜底 | ❌ 未支持/已排除 |
+| LAMZU 非 Maya X / Incott / G-Wolves 等 | `373E:0001..0005`、`093A:*`、`33E4:*` 等 | 无本协议证据或未实现，不按同 VID 泛化 | ❌ 未支持/已排除 |
+
+按行统计：✅ 3、🟡 87、🧪 4、⚪ 5、❌ 11，共 110 行。该统计随矩阵行数变化，修改表格时必须同步；完整型号数、PID 数和证据仍以代码与 `docs/protocol-research/` 为准。
+
+与设备协议无关的产品级未实现项：跨扫描/跨启动电量缓存、自定义 JSON 协议导入界面、系统 Toast 通知、单实例限制、代码签名。当前状态卡可以显示休眠、未知、未找到协议等状态，但不会保存并重用上一轮扫描的电量；`Asleep`/`Stale` 只是状态展示，不等同于缓存。未识别设备默认不显示，打开“显示无电池设备”后才会列出并标注“未找到电量协议”。
 
 ## 功能
 
 - 托盘常驻，左键面板，右键菜单
 - 深色 / 浅色 / 跟随系统，八位堂像素风自绘界面：硬边框、零圆角、方块电量、Fusion Pixel 12px 中文字体
-- Windows 原生标题栏：最小化、最大化、关闭都走系统按钮；关闭窗口隐藏到托盘，退出走右键菜单
+- 应用自绘像素标题栏：左侧电池图标 + AnyBattery，右侧最小化、最大化/还原、关闭到托盘三个像素按钮；关闭隐藏到托盘，退出仍走托盘右键菜单
+- 像素电池应用图标：exe、窗口、标题栏与托盘默认图标同源；静态品牌图标固定色，动态托盘按最低电量使用五档色
+- 五档电量配色：0–10 红、11–20 橙、21–50 黄/赭黄、51–80 黄绿/橄榄、81–100 绿；卡片电量格与动态托盘一致，充电保留档色；10%/20% 提醒阈值不变
 - 电量格、充电状态、上次更新时间、数据来源与“已验证 / 社区协议 / 未验证”标记
 - 一个接收器下的多台设备拆成独立卡片（罗技 HID++ 多设备槽）
-- 设备休眠时保留上次值并标灰
 - 刷新间隔 15 秒 – 30 分钟可调，默认 60 秒
 - 低电量横幅与托盘图标变色
 - 诊断页：HID 接口、usage、报文来源、复制诊断信息
@@ -78,14 +256,17 @@ cargo test -p anybattery-core
 crates/anybattery-core/     设备模型、设置、去重、JSON 协议解析
 crates/anybattery-windows/  SetupAPI/CfgMgr32/HID、蓝牙 PnP、Xbox、厂商适配器
 crates/anybattery-app/      egui 面板、托盘、设置、诊断
-docs/                       设计图与截图
+docs/                       设计图、截图与协议研究
 ```
 
 ## 已知限制
 
-- 新协议族只做了编译与报文形状校验，尚未逐型号真机验证；请用诊断页反馈。
-- BLE 设备目前依赖 Windows PnP 电量属性，未主动连接 GATT。
-- 只有 Windows 真机能验证 HID / 蓝牙行为；CI 交叉编译只保证编译通过。
+- ✅ 只表示本机扫描或官方校准过的少数项目；🟡 社区协议不等于全系兼容，🧪 运行时修复不等于稳定可用，具体以支持矩阵为准。
+- BLE 设备目前依赖 Windows PnP 电量属性，未主动连接 GATT；纯 BLE 且不暴露 PnP 电量的设备仍读不到。
+- 只有 Windows 真机能验证 HID / 蓝牙行为；CI 交叉编译只保证编译通过。Linux 侧只能跑 core 单测。
+- Corsair、Keychron、Razer PA 已有生产 session/脚本传输测试，但仍无对应真机证据；不得把这三类写成真机稳定支持。
+- `HidD_GetFeature` / `HidD_SetFeature` 是同步且不可取消的系统调用；个别固件或驱动仍可能让单次读取阻塞。最终集成扫描 2.99 秒只代表当前设备组合，不构成所有设备的硬上界。
+- MCHOSE 的 caps65/A5 分组修复仍无对应真机；完整 handle 级 `SetFailed`/`GetFailed` 路由缺少 fake-HID 端到端测试。`1532:0528` 充电中自报电量仅粗略参考。
 - 首次扫描会逐个读取 HID 接口，可能需要数秒到十几秒。
 - 与 Synapse / G HUB 等厂商软件同时运行时，HID 接口可能被占用。
 - 目前没有代码签名。
@@ -94,4 +275,4 @@ docs/                       设计图与截图
 
 MIT OR Apache-2.0。内置 Fusion Pixel 12px 子集，许可见 `crates/anybattery-app/assets/FusionPixel-OFL.txt`。
 
-协议事实参考 HaloBattery（MIT）、SDL3（zlib）、OpenRazer（GPL-2.0，仅协议常量）、HeadsetControl（MIT）等公开资料；本项目为净室重写，不包含其源代码。
+协议事实参考 HaloBattery（MIT）、SDL3（zlib）、OpenRazer（GPL-2.0，仅协议常量）、HeadsetControl（GPL-3.0，仅协议事实）等公开资料；本项目为净室重写，不包含其源代码。

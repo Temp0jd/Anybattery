@@ -47,7 +47,7 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([430.0, 680.0])
             .with_min_inner_size([380.0, 520.0])
-            .with_decorations(true)
+            .with_decorations(false)
             .with_resizable(true)
             .with_title("AnyBattery")
             .with_icon(Arc::new(icons::window_icon())),
