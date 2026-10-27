@@ -7,6 +7,12 @@
 基线：AnyBattery 工作树 HEAD `70906c7`，含未提交 UI/协议改动；Razer/Logitech 关键实现位于 `crates/anybattery-windows/src/vendor.rs`、`extra.rs`、`hid.rs`、`scan.rs`。  
 证据原则：协议事实优先来自一手源码/官方文档；HaloBattery、FerrisPulse 作为 Windows 独立实现交叉印证；GPL 代码只读事实，不复制实现。
 
+> **FerrisPulse 校正（2026-10-27）**：本文下方早期 Razer PID 映射来自 OpenRazer/HaloBattery 快照，已过时。以下实现事实以 FerrisPulse commit `4917a10e238ed3dba2938969752886353c8ff5e9`（GPL-3.0；仅提取协议事实，不复制代码）和当前工作树 `crates/anybattery-windows/src/vendor.rs` 的 `razer_name`/`razer_uses_special_protocol` 为准：
+> - Razer Viper V2 Pro 是 `1532:00B4`（有线）/ `1532:00B5`（接收器），首选 TID `0x1F`，Community。
+> - `1532:00A5` / `1532:00A6` 是 Razer Cobra Pro，不是 Viper V2 Pro。
+> - 原文 B2/B3/C1 中 `00A5/00A6 = Viper V2 Pro`、`00B4 = Naga V2 HyperSpeed` 等旧映射只保留作研究历史，**不得再作为实现依据**；当前 90B 表以代码为准。
+> - 本文其余“当前代码”差距描述以基线 `70906c7` 为准；`0528`/`0557`/90–91 字节等已在当前工作树修正，勿当作最新实现状态。
+
 ## 结论速览
 
 1. **Razer 当前表基本是 HaloBattery `KNOWN` 的拷贝，并继承了它最危险的两个型号错误**：`1532:0528` 不是 90 字节标准协议，而是 64 字节 `0xFF` Feature 协议；`1532:0557` 的公开 USB ID 是 **BlackShark V2 X USB（有线）**，不是 BlackShark V2 Pro 2023。当前却把两者都标成 `Verified` 并走 `read_razer`（90 字节）路径。[7][8][10][32]
@@ -292,7 +298,7 @@ OpenRazer 的电池/充电分支只使用 `0x1F/0x3F/0xFF/0x9F`；HaloBattery �
 | 字段 | offset（90 字节结构，无 report ID） | 说明 |
 |---|---:|---|
 | status | 0 | 请求 0x00；回复 0x01 busy / 0x02 success / 0x03 failure / 0x04 timeout / 0x05 not supported |
-| transaction_id | 1 | 0x1F / 0x3F / 0x9F / 0xFF；当前还试 0x08（无一手依据） |
+| transaction_id | 1 | 0x1F / 0x3F / 0x9F / 0xFF；基线还试 0x08（无一手依据），当前代码已移除 |
 | remaining_packets | 2..3 | big-endian，普通单包为 0 |
 | protocol_type | 4 | 0x00 |
 | data_size | 5 | 普通电池请求为 0x02 |
@@ -330,7 +336,9 @@ Windows HID 额外加 report ID 0，总长 91；但必须根据 `FeatureReportBy
 
 ### B2. Razer 鼠标矩阵（按 TID 分组）
 
-以下 PID→TID 来自 OpenRazer `razer_attr_read_charge_level()`（commit `6820f9d`），HaloBattery 的表与其一致；当前表除 0528/053A/0555/0556/0557/00A4 外基本一致。[4][8][14]
+> **旧表警告**：下表是 FerrisPulse 校正前的 OpenRazer/HaloBattery 快照，PID→型号关系已过时，不得作为实现依据；校正见文首“FerrisPulse 校正”。
+
+以下 PID→TID 来自 OpenRazer `razer_attr_read_charge_level()`（commit `6820f9d`），HaloBattery 的表与其一致；这是基线 `70906c7` 时的快照，与当时的表除 0528/053A/0555/0556/0557/00A4 外基本一致。当前表已按 FerrisPulse 重写，本表只作研究历史。[4][8][14]
 
 | TID | PID | 型号/连接（OpenRazer 名称） |
 |---|---|---|

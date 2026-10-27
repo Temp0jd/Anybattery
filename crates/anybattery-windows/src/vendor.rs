@@ -114,8 +114,9 @@ fn razer_name(pid: u16) -> Option<(&'static str, u8, Confidence)> {
     let verified = Confidence::Verified;
     let community = Confidence::Community;
     Some(match pid {
-        // 0x0555/0x0556 are routed to the PA protocol in extra.rs, which marks
-        // them Community; keep the generic table consistent if it is ever read.
+        // Keyboard and headset entries keep their existing generic-protocol
+        // routing. 0x0555/0x0556 are actually routed to the PA protocol in
+        // extra.rs; the table stays consistent if they are ever read here.
         0x0555 => ("Razer BlackShark V2 Pro (2023)", 0x3F, community),
         0x0556 => ("Razer BlackShark V2 Pro (2023)", 0x3F, community),
         0x053A => ("Razer Barracuda Pro (2.4 GHz)", 0x3F, community),
@@ -131,7 +132,88 @@ fn razer_name(pid: u16) -> Option<(&'static str, u8, Confidence)> {
         0x02D7 => ("Razer BlackWidow V4 Tenkeyless HyperSpeed", 0x1F, community),
         0x025A => ("Razer BlackWidow V3 Pro", 0x3F, community),
         0x025C => ("Razer BlackWidow V3 Pro", 0x9F, community),
-        0x00A4 => ("Razer Mouse Dock Pro", 0x1F, community),
+
+        // Mouse PIDs mirror FerrisPulse `RazerPidToOfficialName` (GPL-3.0,
+        // protocol facts only). 0x00BF and 0x0296 are the only locally
+        // verified models; everything else stays Community.
+        // Viper
+        0x00E5 => ("Razer Viper V4 Pro", 0x1F, community),
+        0x00E6 => ("Razer Viper V4 Pro", 0x1F, community),
+        0x00C0 => ("Razer Viper V3 Pro", 0x1F, community),
+        0x00C1 => ("Razer Viper V3 Pro", 0x1F, community),
+        0x00C2 => ("Razer Viper V3 Pro", 0x1F, community),
+        0x00C3 => ("Razer Viper V3 Pro", 0x1F, community),
+        0x00DE => ("Razer Viper V3 Pro SE", 0x1F, community),
+        0x00DF => ("Razer Viper V3 Pro SE", 0x1F, community),
+        0x00AC => ("Razer Viper V3 HyperSpeed", 0x1F, community),
+        0x00AD => ("Razer Viper V3 HyperSpeed", 0x1F, community),
+        0x00B4 => ("Razer Viper V2 Pro", 0x1F, community),
+        0x00B5 => ("Razer Viper V2 Pro", 0x1F, community),
+        0x00A7 => ("Razer Viper Mini Signature Edition", 0x1F, community),
+        0x00A8 => ("Razer Viper Mini Signature Edition", 0x1F, community),
+        0x0084 => ("Razer Viper Ultimate", 0x1F, community),
+        0x0088 => ("Razer Viper Ultimate", 0x1F, community),
+        0x0078 => ("Razer Viper Mini", 0x1F, community),
+        0x0071 => ("Razer Viper 8KHz", 0x1F, community),
+        0x0070 => ("Razer Viper", 0x1F, community),
+
+        // Accessories
+        0x00B9 => ("Razer HyperPolling Wireless Dongle", 0x1F, community),
+
+        // DeathAdder
+        0x00BE => ("Razer DeathAdder V4 Pro", 0x1F, community),
+        0x00BF => ("Razer DeathAdder V4 Pro", 0x1F, verified),
+        0x00B6 => ("Razer DeathAdder V3 Pro", 0x1F, community),
+        0x00B7 => ("Razer DeathAdder V3 Pro", 0x1F, community),
+        0x00B2 => ("Razer DeathAdder V3 HyperSpeed", 0x1F, community),
+        0x00B3 => ("Razer DeathAdder V3 HyperSpeed", 0x1F, community),
+        0x00B0 => ("Razer DeathAdder V3", 0x1F, community),
+        0x00A2 => ("Razer DeathAdder V2 Pro", 0x1F, community),
+        0x00A3 => ("Razer DeathAdder V2 Pro", 0x1F, community),
+        0x009C => ("Razer DeathAdder V2 X HyperSpeed", 0x1F, community),
+        0x008A => ("Razer DeathAdder V2", 0x1F, community),
+        0x007C => ("Razer DeathAdder V2 Mini", 0x1F, community),
+        0x007D => ("Razer DeathAdder V2 Mini", 0x1F, community),
+        0x005C => ("Razer DeathAdder Elite", 0x1F, community),
+
+        // Basilisk
+        0x00CC => ("Razer Basilisk V3 Pro 35K", 0x1F, community),
+        0x00CD => ("Razer Basilisk V3 Pro 35K", 0x1F, community),
+        0x00D6 => ("Razer Basilisk V3 Pro 35K (Phantom Green)", 0x1F, community),
+        0x00D7 => ("Razer Basilisk V3 Pro 35K (Phantom Green)", 0x1F, community),
+        0x00C4 => ("Razer Basilisk V3 35K", 0x1F, community),
+        0x00C5 => ("Razer Basilisk V3 35K", 0x1F, community),
+        0x009A => ("Razer Basilisk V3 Pro", 0x1F, community),
+        0x009B => ("Razer Basilisk V3 Pro", 0x1F, community),
+        0x00AA => ("Razer Basilisk V3 Pro", 0x1F, community),
+        0x00AB => ("Razer Basilisk V3 Pro", 0x1F, community),
+        0x00B8 => ("Razer Basilisk V3", 0x1F, community),
+        0x0085 => ("Razer Basilisk X HyperSpeed", 0x1F, community),
+        0x0086 => ("Razer Basilisk X HyperSpeed", 0x1F, community),
+        0x007A => ("Razer Basilisk Ultimate", 0x1F, community),
+        0x007B => ("Razer Basilisk Ultimate", 0x1F, community),
+        0x0064 => ("Razer Basilisk", 0x1F, community),
+
+        // Cobra
+        0x00A5 => ("Razer Cobra Pro", 0x1F, community),
+        0x00A6 => ("Razer Cobra Pro", 0x1F, community),
+        0x00A4 => ("Razer Cobra", 0x1F, community),
+
+        // Naga
+        0x008F => ("Razer Naga V2 Pro", 0x1F, community),
+        0x0090 => ("Razer Naga V2 Pro", 0x1F, community),
+        0x0095 => ("Razer Naga V2 HyperSpeed", 0x1F, community),
+        0x0091 => ("Razer Naga Pro", 0x1F, community),
+        0x0092 => ("Razer Naga Pro", 0x1F, community),
+        0x0080 => ("Razer Naga Left-Handed Edition", 0x1F, community),
+        0x0067 => ("Razer Naga Trinity", 0x1F, community),
+
+        // Orochi
+        0x0099 => ("Razer Orochi V2", 0x1F, community),
+
+        // Legacy mouse entries not covered by FerrisPulse. Keep them so
+        // existing devices do not lose support. Where a PID is also covered
+        // by FerrisPulse above, the FerrisPulse entry wins.
         0x001F => ("Razer Naga Epic", 0xFF, community),
         0x0024 => ("Razer Mamba (2012)", 0xFF, community),
         0x0025 => ("Razer Mamba (2012)", 0xFF, community),
@@ -144,65 +226,36 @@ fn razer_name(pid: u16) -> Option<(&'static str, u8, Confidence)> {
         0x005A => ("Razer Lancehead", 0x3F, community),
         0x0062 => ("Razer Atheris", 0x1F, community),
         0x006F => ("Razer Lancehead Wireless", 0x1F, community),
-        0x0070 => ("Razer Lancehead Wireless", 0x1F, community),
         0x0072 => ("Razer Mamba Wireless", 0x3F, community),
         0x0073 => ("Razer Mamba Wireless", 0x3F, community),
         0x0077 => ("Razer Pro Click", 0x1F, community),
-        0x0080 => ("Razer Pro Click", 0x1F, community),
-        0x007A => ("Razer Viper Ultimate", 0xFF, community),
-        0x007B => ("Razer Viper Ultimate", 0xFF, community),
-        0x007C => ("Razer DeathAdder V2 Pro", 0x3F, community),
-        0x007D => ("Razer DeathAdder V2 Pro", 0x3F, community),
-        0x0083 => ("Razer Basilisk X HyperSpeed", 0xFF, community),
-        0x0086 => ("Razer Basilisk Ultimate", 0x1F, community),
-        0x0088 => ("Razer Basilisk Ultimate", 0x1F, community),
-        0x008F => ("Razer Naga Pro", 0x1F, community),
-        0x0090 => ("Razer Naga Pro", 0x1F, community),
         0x0094 => ("Razer Orochi V2", 0x1F, community),
-        0x009A => ("Razer Pro Click Mini", 0x1F, community),
-        0x009C => ("Razer DeathAdder V2 X HyperSpeed", 0x1F, community),
         0x009E => ("Razer Viper Mini SE", 0x1F, community),
         0x009F => ("Razer Viper Mini SE", 0x1F, community),
-        0x00A5 => ("Razer Viper V2 Pro", 0x1F, community),
-        0x00A6 => ("Razer Viper V2 Pro", 0x1F, community),
-        0x00A7 => ("Razer Naga V2 Pro", 0x1F, community),
-        0x00A8 => ("Razer Naga V2 Pro", 0x1F, community),
-        0x00AA => ("Razer Basilisk V3 Pro", 0x1F, community),
-        0x00AB => ("Razer Basilisk V3 Pro", 0x1F, community),
         0x00AF => ("Razer Cobra Pro", 0x1F, community),
-        0x00B0 => ("Razer Cobra Pro", 0x1F, community),
-        0x00B3 => ("Razer HyperPolling Dongle", 0x1F, community),
-        0x00B4 => ("Razer Naga V2 HyperSpeed", 0x1F, community),
-        0x00B6 => ("Razer DeathAdder V3 Pro", 0x1F, community),
-        0x00B7 => ("Razer DeathAdder V3 Pro", 0x1F, community),
-        0x00B8 => ("Razer Viper V3 HyperSpeed", 0x1F, community),
-        0x00B9 => ("Razer Basilisk V3 X HyperSpeed", 0x1F, community),
-        0x00BE => ("Razer DeathAdder V4 Pro", 0x1F, community),
-        0x00BF => ("Razer DeathAdder V4 Pro", 0x1F, verified),
-        0x00C0 => ("Razer Viper V3 Pro", 0x1F, community),
-        0x00C1 => ("Razer Viper V3 Pro", 0x1F, community),
-        0x00C2 => ("Razer DeathAdder V3 Pro", 0x1F, community),
-        0x00C3 => ("Razer DeathAdder V3 Pro", 0x1F, community),
-        0x00C4 => ("Razer DeathAdder V3 HyperSpeed", 0x1F, community),
-        0x00C5 => ("Razer DeathAdder V3 HyperSpeed", 0x1F, community),
         0x00C7 => ("Razer Pro Click V2 Vertical Edition", 0x1F, community),
         0x00C8 => ("Razer Pro Click V2 Vertical Edition", 0x1F, community),
-        0x00CC => ("Razer Basilisk V3 Pro 35K", 0x1F, community),
-        0x00CD => ("Razer Basilisk V3 Pro 35K", 0x1F, community),
         0x00D0 => ("Razer Pro Click V2", 0x1F, community),
         0x00D1 => ("Razer Pro Click V2", 0x1F, community),
         0x00D3 => ("Razer Basilisk Mobile", 0x1F, community),
         0x00D4 => ("Razer Basilisk Mobile", 0x1F, community),
-        0x00D6 => ("Razer Basilisk V3 Pro 35K Phantom Green", 0x1F, community),
-        0x00D7 => ("Razer Basilisk V3 Pro 35K Phantom Green", 0x1F, community),
         _ => return None,
     })
 }
 
-fn build_razer_request(transaction_id: u8, class: u8, command: u8) -> [u8; 91] {
-    let mut buffer = [0u8; 91];
-    buffer[0] = 0;
-    let msg = &mut buffer[1..];
+fn build_razer_request(
+    report_len: usize,
+    transaction_id: u8,
+    class: u8,
+    command: u8,
+) -> Option<Vec<u8>> {
+    if !matches!(report_len, 90 | 91) {
+        return None;
+    }
+    let prefix = report_len - 90;
+    let mut buffer = vec![0u8; report_len];
+    let msg = &mut buffer[prefix..];
+    msg[0] = 0x00;
     msg[1] = transaction_id;
     msg[5] = 0x02;
     msg[6] = class;
@@ -212,7 +265,7 @@ fn build_razer_request(transaction_id: u8, class: u8, command: u8) -> [u8; 91] {
         crc ^= *byte;
     }
     msg[88] = crc;
-    buffer
+    Some(buffer)
 }
 
 fn normalize_razer_reply(reply: &[u8]) -> Option<Vec<u8>> {
@@ -225,62 +278,96 @@ fn normalize_razer_reply(reply: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
-fn razer_query(info: &HidInterface, tid: u8, class: u8, command: u8) -> Option<(u8, u8)> {
-    let request = build_razer_request(tid, class, command);
-    if !hid::feature_set(&info.path, &request) {
+fn razer_level(raw: u8) -> u8 {
+    let percent = (u32::from(raw) * 100 + 127) / 255;
+    percent.clamp(1, 100) as u8
+}
+
+fn parse_razer_battery(reply: &[u8]) -> Option<u8> {
+    let data = normalize_razer_reply(reply)?;
+    if data[0] != 0x02 || data[6] != 0x07 || data[7] != 0x80 || data[9] == 0 {
         return None;
     }
-    std::thread::sleep(Duration::from_millis(60));
-    let deadline = std::time::Instant::now() + Duration::from_millis(1000);
-    while std::time::Instant::now() < deadline {
-        let reply = hid::feature_get(&info.path, 91)?;
-        let data = normalize_razer_reply(&reply)?;
-        let status = data[0];
-        if data[6] == class && data[7] == command {
-            return Some((status, data[9]));
+    Some(razer_level(data[9]))
+}
+
+fn parse_razer_charging(reply: &[u8]) -> Option<bool> {
+    let data = normalize_razer_reply(reply)?;
+    (data[0] == 0x02 && data[6] == 0x07 && data[7] == 0x84).then_some(data[9] == 1)
+}
+
+const RAZER_POLL_ATTEMPTS: u8 = 5;
+const RAZER_POLL_DELAY: Duration = Duration::from_millis(60);
+
+fn razer_transaction_ids(preferred: u8) -> Vec<u8> {
+    let mut ids = Vec::with_capacity(4);
+    for tid in [preferred, 0x1F, 0x3F, 0xFF] {
+        if !ids.contains(&tid) {
+            ids.push(tid);
         }
-        if status != 0x01 && status != 0x02 {
-            return Some((status, 0));
-        }
-        std::thread::sleep(Duration::from_millis(80));
     }
-    None
+    ids
+}
+
+fn razer_query<T>(
+    info: &HidInterface,
+    report_len: usize,
+    tid: u8,
+    class: u8,
+    command: u8,
+    parse: impl FnMut(&[u8]) -> Option<T>,
+) -> Option<T> {
+    let request = build_razer_request(report_len, tid, class, command)?;
+    hid::feature_poll(
+        &info.path,
+        &request,
+        report_len,
+        RAZER_POLL_ATTEMPTS,
+        RAZER_POLL_DELAY,
+        parse,
+    )
+}
+
+fn razer_report_len(feature_len: u16) -> Option<usize> {
+    matches!(feature_len, 90 | 91).then_some(feature_len as usize)
 }
 
 fn read_razer(info: &HidInterface) -> Option<VendorReading> {
-    let (name, preferred_tid, verification) = razer_name(info.product_id)
-        .or_else(|| {
-            let lower = info.product.to_lowercase();
-            let wireless = ["hyperspeed", "wireless", "receiver", "dongle", "blackshark", "barracuda"]
-                .iter()
-                .any(|word| lower.contains(word));
-            wireless.then_some((info.product.as_str(), 0x1F, Confidence::Unverified))
-        })
-        ?;
-    let mut level = None;
-    let mut used_tid = preferred_tid;
-    for tid in [preferred_tid, 0x1F, 0x9F, 0x3F, 0xFF, 0x08] {
-        if let Some((status, raw)) = razer_query(info, tid, 0x07, 0x80) {
-            if status == 0x02 {
-                let value = ((raw as u32 * 100 + 127) / 255) as u8;
-                if value <= 100 {
-                    level = Some(value);
-                    used_tid = tid;
-                    break;
-                }
-            }
+    let (name, preferred_tid, verification) = razer_name(info.product_id).or_else(|| {
+        let lower = info.product.to_lowercase();
+        let wireless = [
+            "hyperspeed",
+            "wireless",
+            "receiver",
+            "dongle",
+            "blackshark",
+            "barracuda",
+        ]
+        .iter()
+        .any(|word| lower.contains(word));
+        wireless.then_some((info.product.as_str(), 0x1F, Confidence::Unverified))
+    })?;
+    let report_len = razer_report_len(info.feature_len)?;
+    let mut battery = None;
+    for tid in razer_transaction_ids(preferred_tid) {
+        if let Some(level) = razer_query(info, report_len, tid, 0x07, 0x80, parse_razer_battery) {
+            battery = Some((level, tid));
+            break;
         }
     }
-    let level = level?;
-    let charging = razer_query(info, used_tid, 0x07, 0x84)
-        .filter(|(status, _)| *status == 0x02)
-        .map(|(_, raw)| raw != 0);
+    let (level, used_tid) = battery?;
+    let charging = razer_query(info, report_len, used_tid, 0x07, 0x84, parse_razer_charging);
+    let model = name.strip_prefix("Razer ").unwrap_or(name);
     Some(VendorReading {
         level,
         charging,
         provider: "Razer 90-byte",
         verification,
-        detail: format!("{} · tid={:#04X}", name, used_tid),
+        detail: format!(
+            "Razer · {model} · pid={:#06X} · report_len={} · tid={:#04X}",
+            info.product_id, report_len, used_tid
+        ),
+        name: Some(name.to_owned()),
         ..Default::default()
     })
 }
@@ -1366,16 +1453,17 @@ pub fn read_logitech(info: &HidInterface) -> Vec<VendorReading> {
 #[cfg(test)]
 mod tests {
     use super::{
-        aula_checksum, aula_query, compX_name, delux_candidate, delux_request, is_compX_vid,
-        mchose_candidate, mchose_request, parse_aula_battery, parse_delux_reply,
-        parse_logitech_adc, parse_logitech_battery_status, parse_logitech_unified,
-        parse_logitech_voltage, parse_mchose_reply, parse_pixart_reply, parse_razer_0528,
-        parse_vaxee_battery, parse_vaxee_charging, pixart_candidate, pixart_interface_ok,
-        pixart_name, pixart_product_ok, pixart_request, razer_0528_candidate, razer_0528_charging,
-        razer_0528_request, razer_name, razer_uses_special_protocol, select_oem_paths,
-        vaxee_candidate,
-        vaxee_request, voltage_to_percent, DeluxReading, MchoseReading, PixArtReading,
-        Razer0528Reply, LOGITECH_RECEIVERS,
+        DeluxReading, LOGITECH_RECEIVERS, MchoseReading, PixArtReading, Razer0528Reply,
+        aula_checksum, aula_query, build_razer_request, compX_name, delux_candidate, delux_request,
+        is_compX_vid, mchose_candidate, mchose_request, normalize_razer_reply, parse_aula_battery,
+        parse_delux_reply, parse_logitech_adc, parse_logitech_battery_status,
+        parse_logitech_unified, parse_logitech_voltage, parse_mchose_reply, parse_pixart_reply,
+        parse_razer_0528, parse_razer_battery, parse_razer_charging, parse_vaxee_battery,
+        parse_vaxee_charging, pixart_candidate, pixart_interface_ok, pixart_name,
+        pixart_product_ok, pixart_request, razer_0528_candidate, razer_0528_charging,
+        razer_0528_request, razer_name, razer_report_len, razer_transaction_ids,
+        razer_uses_special_protocol, select_oem_paths, vaxee_candidate, vaxee_request,
+        voltage_to_percent,
     };
     use crate::hid::HidInterface;
     use anybattery_core::Confidence;
@@ -1465,6 +1553,279 @@ mod tests {
         assert_eq!(razer_confidence(0x0296), Some(Confidence::Verified));
         assert_eq!(razer_confidence(0x00BF), Some(Confidence::Verified));
         assert_eq!(razer_confidence(0x0555), Some(Confidence::Community));
+    }
+
+    fn razer_model(pid: u16) -> Option<&'static str> {
+        razer_name(pid).map(|(name, _, _)| name)
+    }
+
+    fn razer_crc(report: &[u8], offset: usize) -> u8 {
+        report[offset + 2..offset + 88]
+            .iter()
+            .fold(0, |crc, byte| crc ^ byte)
+    }
+
+    fn razer_reply(report_len: usize, status: u8, class: u8, command: u8, raw: u8) -> Vec<u8> {
+        let mut reply = vec![0u8; report_len];
+        let offset = report_len - 90;
+        reply[offset] = status;
+        reply[offset + 6] = class;
+        reply[offset + 7] = command;
+        reply[offset + 9] = raw;
+        reply
+    }
+
+    #[test]
+    fn razer_viper_v2_pro_uses_b4_and_b5_and_is_not_naga() {
+        assert_eq!(razer_model(0x00B4), Some("Razer Viper V2 Pro"));
+        assert_eq!(razer_model(0x00B5), Some("Razer Viper V2 Pro"));
+        assert_ne!(razer_model(0x00B4), Some("Razer Naga V2 HyperSpeed"));
+        assert_ne!(razer_model(0x00B5), Some("Razer Naga V2 HyperSpeed"));
+        assert_eq!(
+            razer_name(0x00B4).map(|(_, tid, confidence)| (tid, confidence)),
+            Some((0x1F, Confidence::Community))
+        );
+        assert_eq!(
+            razer_name(0x00B5).map(|(_, tid, confidence)| (tid, confidence)),
+            Some((0x1F, Confidence::Community))
+        );
+    }
+
+    #[test]
+    fn razer_receiver_and_wired_viper_v2_pro_enter_the_generic_reader() {
+        assert!(!razer_uses_special_protocol(0x00B4));
+        assert!(!razer_uses_special_protocol(0x00B5));
+        assert_eq!(razer_report_len(90), Some(90));
+        assert_eq!(razer_report_len(91), Some(91));
+        assert_eq!(razer_report_len(64), None);
+        assert_eq!(razer_transaction_ids(0x1F), vec![0x1F, 0x3F, 0xFF]);
+    }
+
+    #[test]
+    fn razer_ferrispulse_mouse_models_are_mapped() {
+        let expected = [
+            (0x00E5, "Razer Viper V4 Pro"),
+            (0x00E6, "Razer Viper V4 Pro"),
+            (0x00C0, "Razer Viper V3 Pro"),
+            (0x00C1, "Razer Viper V3 Pro"),
+            (0x00C2, "Razer Viper V3 Pro"),
+            (0x00C3, "Razer Viper V3 Pro"),
+            (0x00DE, "Razer Viper V3 Pro SE"),
+            (0x00DF, "Razer Viper V3 Pro SE"),
+            (0x00AC, "Razer Viper V3 HyperSpeed"),
+            (0x00AD, "Razer Viper V3 HyperSpeed"),
+            (0x00B4, "Razer Viper V2 Pro"),
+            (0x00B5, "Razer Viper V2 Pro"),
+            (0x00A7, "Razer Viper Mini Signature Edition"),
+            (0x00A8, "Razer Viper Mini Signature Edition"),
+            (0x0084, "Razer Viper Ultimate"),
+            (0x0088, "Razer Viper Ultimate"),
+            (0x0078, "Razer Viper Mini"),
+            (0x0071, "Razer Viper 8KHz"),
+            (0x0070, "Razer Viper"),
+            (0x00B9, "Razer HyperPolling Wireless Dongle"),
+            (0x00BE, "Razer DeathAdder V4 Pro"),
+            (0x00BF, "Razer DeathAdder V4 Pro"),
+            (0x00B6, "Razer DeathAdder V3 Pro"),
+            (0x00B7, "Razer DeathAdder V3 Pro"),
+            (0x00B2, "Razer DeathAdder V3 HyperSpeed"),
+            (0x00B3, "Razer DeathAdder V3 HyperSpeed"),
+            (0x00B0, "Razer DeathAdder V3"),
+            (0x00A2, "Razer DeathAdder V2 Pro"),
+            (0x00A3, "Razer DeathAdder V2 Pro"),
+            (0x009C, "Razer DeathAdder V2 X HyperSpeed"),
+            (0x008A, "Razer DeathAdder V2"),
+            (0x007C, "Razer DeathAdder V2 Mini"),
+            (0x007D, "Razer DeathAdder V2 Mini"),
+            (0x005C, "Razer DeathAdder Elite"),
+            (0x00CC, "Razer Basilisk V3 Pro 35K"),
+            (0x00CD, "Razer Basilisk V3 Pro 35K"),
+            (0x00D6, "Razer Basilisk V3 Pro 35K (Phantom Green)"),
+            (0x00D7, "Razer Basilisk V3 Pro 35K (Phantom Green)"),
+            (0x00C4, "Razer Basilisk V3 35K"),
+            (0x00C5, "Razer Basilisk V3 35K"),
+            (0x009A, "Razer Basilisk V3 Pro"),
+            (0x009B, "Razer Basilisk V3 Pro"),
+            (0x00AA, "Razer Basilisk V3 Pro"),
+            (0x00AB, "Razer Basilisk V3 Pro"),
+            (0x00B8, "Razer Basilisk V3"),
+            (0x0085, "Razer Basilisk X HyperSpeed"),
+            (0x0086, "Razer Basilisk X HyperSpeed"),
+            (0x007A, "Razer Basilisk Ultimate"),
+            (0x007B, "Razer Basilisk Ultimate"),
+            (0x0064, "Razer Basilisk"),
+            (0x00A5, "Razer Cobra Pro"),
+            (0x00A6, "Razer Cobra Pro"),
+            (0x00A4, "Razer Cobra"),
+            (0x008F, "Razer Naga V2 Pro"),
+            (0x0090, "Razer Naga V2 Pro"),
+            (0x0095, "Razer Naga V2 HyperSpeed"),
+            (0x0091, "Razer Naga Pro"),
+            (0x0092, "Razer Naga Pro"),
+            (0x0080, "Razer Naga Left-Handed Edition"),
+            (0x0067, "Razer Naga Trinity"),
+            (0x0099, "Razer Orochi V2"),
+        ];
+        assert_eq!(expected.len(), 61);
+        for (pid, name) in expected {
+            assert_eq!(razer_model(pid), Some(name), "{pid:#06X}");
+        }
+        assert_eq!(razer_confidence(0x00BF), Some(Confidence::Verified));
+        assert_eq!(razer_confidence(0x00B0), Some(Confidence::Community));
+        assert_eq!(razer_confidence(0x00A5), Some(Confidence::Community));
+    }
+
+    #[test]
+    fn razer_legacy_mouse_entries_are_retained_without_overriding_ferrispulse() {
+        let expected = [
+            (0x001F, "Razer Naga Epic", 0xFF),
+            (0x0024, "Razer Mamba (2012)", 0xFF),
+            (0x0025, "Razer Mamba (2012)", 0xFF),
+            (0x0032, "Razer Ouroboros", 0xFF),
+            (0x003E, "Razer Naga Epic Chroma", 0xFF),
+            (0x003F, "Razer Naga Epic Chroma", 0xFF),
+            (0x0044, "Razer Mamba", 0xFF),
+            (0x0045, "Razer Mamba", 0xFF),
+            (0x0059, "Razer Lancehead", 0x3F),
+            (0x005A, "Razer Lancehead", 0x3F),
+            (0x0062, "Razer Atheris", 0x1F),
+            (0x006F, "Razer Lancehead Wireless", 0x1F),
+            (0x0072, "Razer Mamba Wireless", 0x3F),
+            (0x0073, "Razer Mamba Wireless", 0x3F),
+            (0x0077, "Razer Pro Click", 0x1F),
+            (0x0094, "Razer Orochi V2", 0x1F),
+            (0x009E, "Razer Viper Mini SE", 0x1F),
+            (0x009F, "Razer Viper Mini SE", 0x1F),
+            (0x00AF, "Razer Cobra Pro", 0x1F),
+            (0x00C7, "Razer Pro Click V2 Vertical Edition", 0x1F),
+            (0x00C8, "Razer Pro Click V2 Vertical Edition", 0x1F),
+            (0x00D0, "Razer Pro Click V2", 0x1F),
+            (0x00D1, "Razer Pro Click V2", 0x1F),
+            (0x00D3, "Razer Basilisk Mobile", 0x1F),
+            (0x00D4, "Razer Basilisk Mobile", 0x1F),
+        ];
+        for (pid, name, tid) in expected {
+            assert_eq!(
+                razer_name(pid).map(|(name, tid, _)| (name, tid)),
+                Some((name, tid)),
+                "{pid:#06X}"
+            );
+        }
+
+        // These legacy names conflict with FerrisPulse-covered PIDs, so the
+        // upstream names are kept.
+        assert_eq!(razer_model(0x0070), Some("Razer Viper"));
+        assert_eq!(razer_model(0x0080), Some("Razer Naga Left-Handed Edition"));
+    }
+
+    #[test]
+    fn razer_requests_use_the_caps_length_without_a_fixed_prefix() {
+        let request_91 = build_razer_request(91, 0x1F, 0x07, 0x80).unwrap();
+        assert_eq!(request_91.len(), 91);
+        assert_eq!(request_91[0], 0);
+        assert_eq!(request_91[1], 0);
+        assert_eq!(request_91[2], 0x1F);
+        assert_eq!(request_91[6], 0x02);
+        assert_eq!(request_91[7], 0x07);
+        assert_eq!(request_91[8], 0x80);
+        assert_eq!(request_91[89], razer_crc(&request_91, 1));
+        assert_eq!(request_91[90], 0);
+
+        let request_90 = build_razer_request(90, 0x3F, 0x07, 0x84).unwrap();
+        assert_eq!(request_90.len(), 90);
+        assert_eq!(request_90[0], 0);
+        assert_eq!(request_90[1], 0x3F);
+        assert_eq!(request_90[5], 0x02);
+        assert_eq!(request_90[6], 0x07);
+        assert_eq!(request_90[7], 0x84);
+        assert_eq!(request_90[88], razer_crc(&request_90, 0));
+        assert_eq!(request_90[89], 0);
+
+        assert_eq!(build_razer_request(89, 0x1F, 0x07, 0x80), None);
+        assert_eq!(build_razer_request(92, 0x1F, 0x07, 0x80), None);
+    }
+
+    #[test]
+    fn razer_reply_normalization_accepts_90_91_and_longer_frames() {
+        let reply_91 = razer_reply(91, 0x02, 0x07, 0x80, 128);
+        assert_eq!(normalize_razer_reply(&reply_91).unwrap()[0], 0x02);
+        assert_eq!(normalize_razer_reply(&reply_91).unwrap().len(), 90);
+
+        let reply_90 = razer_reply(90, 0x02, 0x07, 0x80, 128);
+        assert_eq!(normalize_razer_reply(&reply_90).unwrap()[0], 0x02);
+        assert_eq!(normalize_razer_reply(&reply_90).unwrap().len(), 90);
+
+        let mut reply_longer = vec![0u8; 100];
+        reply_longer[1] = 0x02;
+        reply_longer[7] = 0x07;
+        reply_longer[8] = 0x80;
+        reply_longer[10] = 128;
+        assert_eq!(normalize_razer_reply(&reply_longer).unwrap()[0], 0x02);
+        assert_eq!(normalize_razer_reply(&[0u8; 89]), None);
+    }
+
+    #[test]
+    fn razer_battery_parser_rounds_and_rejects_invalid_frames() {
+        assert_eq!(
+            parse_razer_battery(&razer_reply(90, 0x02, 0x07, 0x80, 128)),
+            Some(50)
+        );
+        assert_eq!(
+            parse_razer_battery(&razer_reply(91, 0x02, 0x07, 0x80, 128)),
+            Some(50)
+        );
+        assert_eq!(
+            parse_razer_battery(&razer_reply(91, 0x02, 0x07, 0x80, 1)),
+            Some(1)
+        );
+        assert_eq!(
+            parse_razer_battery(&razer_reply(91, 0x02, 0x07, 0x80, 255)),
+            Some(100)
+        );
+        assert_eq!(
+            parse_razer_battery(&razer_reply(91, 0x02, 0x07, 0x80, 0)),
+            None
+        );
+        assert_eq!(
+            parse_razer_battery(&razer_reply(91, 0x01, 0x07, 0x80, 128)),
+            None
+        );
+        assert_eq!(
+            parse_razer_battery(&razer_reply(91, 0x02, 0x06, 0x80, 128)),
+            None
+        );
+        assert_eq!(
+            parse_razer_battery(&razer_reply(91, 0x02, 0x07, 0x81, 128)),
+            None
+        );
+    }
+
+    #[test]
+    fn razer_charging_parser_maps_one_zero_and_unknown() {
+        assert_eq!(
+            parse_razer_charging(&razer_reply(91, 0x02, 0x07, 0x84, 1)),
+            Some(true)
+        );
+        assert_eq!(
+            parse_razer_charging(&razer_reply(91, 0x02, 0x07, 0x84, 0)),
+            Some(false)
+        );
+        assert_eq!(
+            parse_razer_charging(&razer_reply(90, 0x02, 0x07, 0x84, 1)),
+            Some(true)
+        );
+        assert_eq!(
+            parse_razer_charging(&razer_reply(91, 0x01, 0x07, 0x84, 1)),
+            None
+        );
+        assert_eq!(
+            parse_razer_charging(&razer_reply(91, 0x02, 0x06, 0x84, 1)),
+            None
+        );
+        assert_eq!(
+            parse_razer_charging(&razer_reply(91, 0x02, 0x07, 0x80, 1)),
+            None
+        );
     }
 
     fn hid_interface(

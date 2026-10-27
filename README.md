@@ -42,7 +42,7 @@ Windows 10/11 的 2.4G / 蓝牙设备电量托盘工具。Rust 编写，单 exe�
 |---|---|---|---|---|---|
 | Windows 蓝牙 PnP（经典/BLE） | BTHENUM / BTHLE 任意设备 | `DEVPKEY_BLUETOOTH_BATTERY` PnP 属性 | 1–100% / 未知 | ⚪ 系统/标准 | 纯只读系统属性；设备未暴露或值为 0 时不显示；不做主动 GATT。 |
 | 蓝牙 HFP / 服务节点合并 | 同一 ContainerId | BTHENUM 服务节点电量并入根卡 | 继承服务节点电量 / 未知 | ⚪ 系统/标准 | 零、空、全零 ContainerId 不合并；多个经典根只允许唯一经典根接收 HFP 数据；OPPO 已验证，其他型号未逐台验证。 |
-| OPPO Enco X3 | BTHENUM `DEV_407218C8A7BC`（系统节点，无公开 VID:PID） | Windows PnP + HFP ContainerId 合并 | 实测 90% / 100%；充电未知 | ✅ 本机验证 | `.pi/diag-hfp-merge.txt` 显示 100%，`.pi/diag-final-integration.txt` 显示 90%；HFP 单卡；当前 123 项 Windows 测试通过。 |
+| OPPO Enco X3 | BTHENUM `DEV_407218C8A7BC`（系统节点，无公开 VID:PID） | Windows PnP + HFP ContainerId 合并 | 实测 90% / 100%；充电未知 | ✅ 本机验证 | `.pi/diag-hfp-merge.txt` 显示 100%，`.pi/diag-final-integration.txt` 显示 90%；HFP 单卡；当前 131 项 Windows 测试通过。 |
 | Zero 1 | BTHLE `DEV_CC3D601F1B0C` | Windows BLE PnP | 实测 46%；充电未知 | ✅ 本机验证 | `.pi/diag-final-integration.txt`；GATT 服务节点归并到根卡；仍是 PnP 属性，不是主动 GATT。 |
 | 标准 HID Battery System | usage `0x0085:0x0064`、`0x0085:0x0065`，充电/放电 `0x44/0x45` | Feature/Input value | 百分比 / 充电、放电标志 | ⚪ 系统/标准 | 不再接受 `0x66` 或 `0x0001` 猜百分比；依赖设备描述符和 logical min/max。 |
 | 标准 HID Battery Strength / Digitizer | `0x0006:0x0020`、`0x000D:0x003B` | Feature/Input value | 百分比 / 无充电位则未知 | ⚪ 系统/标准 | 依赖描述符；没有标准充电 usage 时保持未知。 |
@@ -67,59 +67,79 @@ Windows 10/11 的 2.4G / 蓝牙设备电量托盘工具。Rust 编写，单 exe�
 
 ### Razer（雷蛇）
 
-> 口径：Razer 共 81 个 PID = `razer_name` 的 76 个 90B PID + 3 个 PA PID + `0528` + `0557`（仅排除）。`razer_name` 有 45 个唯一型号名 = 43 个 90B 型号 + 2 个 PA 型号；若把 `0528` 与 `0557` 也算作含 PID 的型号行，则为 47 行（其中 `0557` 只排除），另有 1 个无 PID 的兜底行。不要把 45 / 47 / 81 混用。
+> 口径（以当前 `razer_name` / `razer_uses_special_protocol` 为准）：
+> - `razer_name`：101 个 PID / 58 个唯一型号名。
+> - 90B 通用：98 个 PID / 56 个唯一型号名（`053A`、`0555`、`0556` 在 `razer_uses_special_protocol` 中改走 PA）。
+> - PA：3 个 PID / 2 个型号（`053A`、`0555`、`0556`）。
+> - `0528`：1 个 PID / 1 个型号；`0557`：1 个 PID（仅排除）。
+> - 总计：103 个 PID / 60 个唯一型号名，另有 1 个无 PID 的 90B 产品名兜底行；Razer 矩阵共 61 行。
 
 Razer 不是全系支持。下列型号必须同时命中 PID、vendor collection、报文长度/形状才会读取；未知型号、朋友设备等没有型号证据时不承诺。
 
-#### 90 字节通用 Feature（class `0x07`，cmd `0x80` 读电量、`0x84` 读充电）
+#### 90B 通用 Feature（class `0x07`，cmd `0x80` 读电量、`0x84` 读充电）
 
-代码先按表内首选 TID 查询，再依次尝试 `0x1F/0x9F/0x3F/0xFF/0x08`。电量按 `raw * 100 / 255` 四舍五入；充电查询失败时保持未知。下表同一行的多个 PID 是代码中同型号的公开 PID 合并，未逐 PID 验证连接模式。
+代码读取 caps 的 90/91 字节 FeatureReportByteLength（91 字节有前置 report ID `0`，解析时去掉），在同一个 HID 句柄内完成 Set/Get；TID 依次尝试表内首选、`0x1F`、`0x3F`、`0xFF`（去重）。电量按 `round(raw * 100 / 255)` 后 clamp 到 `1..=100`，raw=0 视为无效；充电查询 `0x84` 返回 `1` 为充电，查询失败保持未知。下表同一行的多个 PID 是代码中同型号的公开 PID 合并，未逐 PID 验证连接模式。
 
 | 型号 | VID:PID | 首选 TID | 电量 / 充电 | 状态 | 限制 / 证据 |
 |---|---|---|---|---|---|
-| Razer DeathStalker V2 Pro | `1532:0290` / `1532:0292` | `0x9F` / `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证；Synapse 占用时可能超时。 |
-| Razer DeathStalker V2 Pro TKL | `1532:0296` / `1532:0298` | `0x9F` / `0x1F` | 百分比 / 可选 | 🟡 社区协议 | `0296` 代码内 Verified 来自上游，不是本机验证。 |
-| Razer BlackWidow V3 Mini HyperSpeed | `1532:0271` / `1532:0258` | `0x9F` / `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
-| Razer BlackWidow V4 Mini HyperSpeed | `1532:02BA` / `1532:02B9` | `0x9F` / `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
-| Razer BlackWidow V4 Tenkeyless HyperSpeed | `1532:02D5` / `1532:02D7` | `0x9F` / `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
-| Razer BlackWidow V3 Pro | `1532:025A` / `1532:025C` | `0x3F` / `0x9F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
-| Razer Mouse Dock Pro | `1532:00A4` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 底座设备不一定代表鼠标电量；本机未验证。 |
-| Razer Naga Epic | `1532:001F` | `0xFF` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
-| Razer Mamba (2012) | `1532:0024` / `1532:0025` | `0xFF` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
-| Razer Ouroboros | `1532:0032` | `0xFF` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
-| Razer Naga Epic Chroma | `1532:003E` / `1532:003F` | `0xFF` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
-| Razer Mamba | `1532:0044` / `1532:0045` | `0xFF` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
-| Razer Lancehead | `1532:0059` / `1532:005A` | `0x3F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
-| Razer Atheris | `1532:0062` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
-| Razer Lancehead Wireless | `1532:006F` / `1532:0070` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
-| Razer Mamba Wireless | `1532:0072` / `1532:0073` | `0x3F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
-| Razer Pro Click | `1532:0077` / `1532:0080` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
-| Razer Viper Ultimate | `1532:007A` / `1532:007B` | `0xFF` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
-| Razer DeathAdder V2 Pro | `1532:007C` / `1532:007D` | `0x3F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
-| Razer Basilisk X HyperSpeed | `1532:0083` | `0xFF` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
-| Razer Basilisk Ultimate | `1532:0086` / `1532:0088` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
-| Razer Naga Pro | `1532:008F` / `1532:0090` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
-| Razer Orochi V2 | `1532:0094` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
-| Razer Pro Click Mini | `1532:009A` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
-| Razer DeathAdder V2 X HyperSpeed | `1532:009C` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
-| Razer Viper Mini SE | `1532:009E` / `1532:009F` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
-| Razer Viper V2 Pro | `1532:00A5` / `1532:00A6` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
-| Razer Naga V2 Pro | `1532:00A7` / `1532:00A8` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
-| Razer Basilisk V3 Pro | `1532:00AA` / `1532:00AB` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
-| Razer Cobra Pro | `1532:00AF` / `1532:00B0` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
-| Razer HyperPolling Dongle | `1532:00B3` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 是接收器/轮询器，不代表独立设备；本机未验证。 |
-| Razer Naga V2 HyperSpeed | `1532:00B4` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
-| Razer DeathAdder V3 Pro | `1532:00B6` / `1532:00B7` / `1532:00C2` / `1532:00C3` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
-| Razer Viper V3 HyperSpeed | `1532:00B8` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
-| Razer Basilisk V3 X HyperSpeed | `1532:00B9` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
-| Razer DeathAdder V4 Pro | `1532:00BE` / `1532:00BF` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | `00BF` 代码内 Verified 来自上游，不是本机验证。 |
-| Razer Viper V3 Pro | `1532:00C0` / `1532:00C1` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
-| Razer DeathAdder V3 HyperSpeed | `1532:00C4` / `1532:00C5` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
-| Razer Pro Click V2 Vertical Edition | `1532:00C7` / `1532:00C8` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
-| Razer Basilisk V3 Pro 35K | `1532:00CC` / `1532:00CD` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
-| Razer Pro Click V2 | `1532:00D0` / `1532:00D1` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
-| Razer Basilisk Mobile | `1532:00D3` / `1532:00D4` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
-| Razer Basilisk V3 Pro 35K Phantom Green | `1532:00D6` / `1532:00D7` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 上游 PID/TID；本机未验证。 |
+| Razer DeathStalker V2 Pro | `1532:0290` / `1532:0292` | `0x9F` / `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer DeathStalker V2 Pro TKL | `1532:0296` / `1532:0298` | `0x9F` / `0x1F` | 百分比 / 可选 | 🟡 社区协议 | `0296` 代码内 Verified 来自上游，不是本机验证；`0298` Community。 |
+| Razer BlackWidow V3 Mini HyperSpeed | `1532:0271` / `1532:0258` | `0x9F` / `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer BlackWidow V4 Mini HyperSpeed | `1532:02BA` / `1532:02B9` | `0x9F` / `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer BlackWidow V4 Tenkeyless HyperSpeed | `1532:02D5` / `1532:02D7` | `0x9F` / `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer BlackWidow V3 Pro | `1532:025A` / `1532:025C` | `0x3F` / `0x9F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer Viper V4 Pro | `1532:00E5` / `1532:00E6` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer Viper V3 Pro | `1532:00C0` / `1532:00C1` / `1532:00C2` / `1532:00C3` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer Viper V3 Pro SE | `1532:00DE` / `1532:00DF` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer Viper V3 HyperSpeed | `1532:00AC` / `1532:00AD` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer Viper V2 Pro | `1532:00B4`（有线） / `1532:00B5`（接收器） | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | Community；尚无本机对应硬件；见下方已知限制。 |
+| Razer Viper Mini Signature Edition | `1532:00A7` / `1532:00A8` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer Viper Ultimate | `1532:0084` / `1532:0088` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer Viper Mini | `1532:0078` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer Viper 8KHz | `1532:0071` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer Viper | `1532:0070` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer HyperPolling Wireless Dongle | `1532:00B9` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 是接收器/轮询器，不代表独立设备；本机未验证。 |
+| Razer DeathAdder V4 Pro | `1532:00BE` / `1532:00BF` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | `00BF` 代码内 Verified 来自上游，不是本机验证；`00BE` Community。 |
+| Razer DeathAdder V3 Pro | `1532:00B6` / `1532:00B7` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer DeathAdder V3 HyperSpeed | `1532:00B2` / `1532:00B3` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer DeathAdder V3 | `1532:00B0` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer DeathAdder V2 Pro | `1532:00A2` / `1532:00A3` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer DeathAdder V2 X HyperSpeed | `1532:009C` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer DeathAdder V2 | `1532:008A` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer DeathAdder V2 Mini | `1532:007C` / `1532:007D` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer DeathAdder Elite | `1532:005C` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer Basilisk V3 Pro 35K | `1532:00CC` / `1532:00CD` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer Basilisk V3 Pro 35K (Phantom Green) | `1532:00D6` / `1532:00D7` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer Basilisk V3 35K | `1532:00C4` / `1532:00C5` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer Basilisk V3 Pro | `1532:009A` / `1532:009B` / `1532:00AA` / `1532:00AB` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer Basilisk V3 | `1532:00B8` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer Basilisk X HyperSpeed | `1532:0085` / `1532:0086` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer Basilisk Ultimate | `1532:007A` / `1532:007B` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer Basilisk | `1532:0064` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer Cobra Pro | `1532:00A5` / `1532:00A6` / `1532:00AF` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | `00A5`/`00A6` 为 FerrisPulse 映射，`00AF` 在代码中同名；本机未验证。 |
+| Razer Cobra | `1532:00A4` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer Naga V2 Pro | `1532:008F` / `1532:0090` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer Naga V2 HyperSpeed | `1532:0095` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer Naga Pro | `1532:0091` / `1532:0092` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer Naga Left-Handed Edition | `1532:0080` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer Naga Trinity | `1532:0067` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer Orochi V2 | `1532:0099` / `1532:0094` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer Naga Epic | `1532:001F` | `0xFF` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer Mamba (2012) | `1532:0024` / `1532:0025` | `0xFF` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer Ouroboros | `1532:0032` | `0xFF` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer Naga Epic Chroma | `1532:003E` / `1532:003F` | `0xFF` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer Mamba | `1532:0044` / `1532:0045` | `0xFF` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer Lancehead | `1532:0059` / `1532:005A` | `0x3F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer Atheris | `1532:0062` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer Lancehead Wireless | `1532:006F` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer Mamba Wireless | `1532:0072` / `1532:0073` | `0x3F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer Pro Click | `1532:0077` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer Viper Mini SE | `1532:009E` / `1532:009F` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer Pro Click V2 Vertical Edition | `1532:00C7` / `1532:00C8` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer Pro Click V2 | `1532:00D0` / `1532:00D1` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+| Razer Basilisk Mobile | `1532:00D3` / `1532:00D4` | `0x1F` | 百分比 / 可选 | 🟡 社区协议 | 90B 代码表；本机未验证。 |
+
+> 已知限制：Razer Viper V2 Pro 当前为 🟡 Community，尚无本机对应硬件。如果仍显示未匹配，请从诊断页提供 VID/PID、usage page、feature length、report/tid；不要写成已验证。
 
 #### 专用 64 字节 / PA 路径与排除
 
@@ -195,7 +215,7 @@ Razer 不是全系支持。下列型号必须同时命中 PID、vendor collectio
 
 | 型号 / 型号组 | VID:PID / 接口 | 协议 / 报文 | 电量 / 充电 | 状态 | 限制 / 证据 |
 |---|---|---|---|---|---|
-| DELUX M618Air（model `0x24`） | `1D57:FA60`，MI_02，`000A:0000`，input 5B | 被动 `03 24 40 01 <raw>`；官方 `0x4290b0 → 0x421b90` 档位映射 | raw `1/2/3/4-5/6-7/8..100` → `10/20/40/60/80/100`；state 01 按前版契约记为未充电（官方 handler 未解码充电位） | ✅ 本机验证 | 官方软件 raw6 显示 80%；`.pi/diag-final-integration.txt` 实扫 raw7 显示 80%，charging `Some(false)`，最终集成扫描 2.99 秒、30 秒硬超时内完成，devices=4/bluetooth=2/hid=9；当前 123 项 Windows 测试通过；state `02/03/80` 仍拒绝；名称保持中性。 |
+| DELUX M618Air（model `0x24`） | `1D57:FA60`，MI_02，`000A:0000`，input 5B | 被动 `03 24 40 01 <raw>`；官方 `0x4290b0 → 0x421b90` 档位映射 | raw `1/2/3/4-5/6-7/8..100` → `10/20/40/60/80/100`；state 01 按前版契约记为未充电（官方 handler 未解码充电位） | ✅ 本机验证 | 官方软件 raw6 显示 80%；`.pi/diag-final-integration.txt` 实扫 raw7 显示 80%，charging `Some(false)`，最终集成扫描 2.99 秒、30 秒硬超时内完成，devices=4/bluetooth=2/hid=9；当前 131 项 Windows 测试通过；state `02/03/80` 仍拒绝；名称保持中性。 |
 | 其他 1D57:FA60 / Beken 兼容设备 | `1D57:FA60`，MI_02，`000A:0000`，input 5B | 被动 `03 <id> 40 <state> <raw>` | `0x55` 直接；`0x10/0x85` ×10；其他直接；充电未知 | 🟡 社区协议 | 严格校验头、长度、range；不同 device ID 无品牌/型号承诺；`0x24` 只在 M618Air 证据上下文解释。 |
 
 ### 未支持 / 已排除
@@ -211,7 +231,7 @@ Razer 不是全系支持。下列型号必须同时命中 PID、vendor collectio
 | SteelSeries Rival/Aerox 新协议 | `1038` 非 Nova 型号 | 未实现；通用 AA 只是未验证兜底 | ❌ 未支持/已排除 |
 | LAMZU 非 Maya X / Incott / G-Wolves 等 | `373E:0001..0005`、`093A:*`、`33E4:*` 等 | 无本协议证据或未实现，不按同 VID 泛化 | ❌ 未支持/已排除 |
 
-按行统计：✅ 3、🟡 87、🧪 4、⚪ 5、❌ 11，共 110 行。该统计随矩阵行数变化，修改表格时必须同步；完整型号数、PID 数和证据仍以代码与 `docs/protocol-research/` 为准。
+按行统计：✅ 3、🟡 100、🧪 4、⚪ 5、❌ 11，共 123 行。该统计随矩阵行数变化，修改表格时必须同步；完整型号数、PID 数和证据仍以代码与 `docs/protocol-research/` 为准。
 
 与设备协议无关的产品级未实现项：跨扫描/跨启动电量缓存、自定义 JSON 协议导入界面、系统 Toast 通知、单实例限制、代码签名。当前状态卡可以显示休眠、未知、未找到协议等状态，但不会保存并重用上一轮扫描的电量；`Asleep`/`Stale` 只是状态展示，不等同于缓存。未识别设备默认不显示，打开“显示无电池设备”后才会列出并标注“未找到电量协议”。
 
