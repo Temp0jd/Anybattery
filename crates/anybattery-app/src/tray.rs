@@ -5,6 +5,7 @@ use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, 
 
 use crate::app::UiCommand;
 use crate::icons;
+use crate::tray_popup::{TrayAnchor, TrayHoverEvent};
 
 pub struct TrayHandle {
     pub icon: TrayIcon,
@@ -52,10 +53,23 @@ pub fn build(
                 button_state: MouseButtonState::Up,
                 ..
             } => Some(UiCommand::Toggle),
+            // Any button press dismisses the hover popup before the menu or
+            // toggle action runs, so it cannot linger over the menu.
+            TrayIconEvent::Click {
+                button_state: MouseButtonState::Down,
+                ..
+            } => Some(UiCommand::DismissTrayPopup),
             TrayIconEvent::DoubleClick {
                 button: MouseButton::Left,
                 ..
             } => Some(UiCommand::Show),
+            TrayIconEvent::Enter { rect, .. } => Some(UiCommand::TrayHover(TrayHoverEvent::Enter(
+                anchor_from_rect(rect),
+            ))),
+            TrayIconEvent::Move { rect, .. } => Some(UiCommand::TrayHover(TrayHoverEvent::Move(
+                anchor_from_rect(rect),
+            ))),
+            TrayIconEvent::Leave { .. } => Some(UiCommand::TrayHover(TrayHoverEvent::Leave)),
             _ => None,
         };
         if let Some(command) = command {
@@ -68,13 +82,24 @@ pub fn build(
     let icon: Icon = icons::tray_icon(None, false)?;
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
-        .with_tooltip("AnyBattery · 正在扫描")
         .with_icon(icon)
         .build()
         .ok()?;
+    // The custom hover popup replaces the native tooltip; two summaries would
+    // overlap and flicker on every scan.
+    let _ = tray.set_tooltip(None::<&str>);
 
     Some(TrayHandle {
         icon: tray,
         autostart,
     })
+}
+
+fn anchor_from_rect(rect: tray_icon::Rect) -> TrayAnchor {
+    TrayAnchor::new(
+        rect.position.x,
+        rect.position.y,
+        rect.size.width,
+        rect.size.height,
+    )
 }

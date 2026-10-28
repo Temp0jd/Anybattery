@@ -309,7 +309,13 @@ fn device_detail(device: &DeviceSnapshot, now: u64) -> String {
     }
 }
 
-fn pixel_battery(painter: &egui::Painter, p: &Palette, rect: Rect, fill: f32, color: Color32) {
+pub(crate) fn pixel_battery(
+    painter: &egui::Painter,
+    p: &Palette,
+    rect: Rect,
+    fill: f32,
+    color: Color32,
+) {
     let cells = 8;
     let gap = 1.5;
     let cell_width = (rect.width() - gap * (cells as f32 - 1.0)) / cells as f32;
@@ -331,7 +337,12 @@ fn pixel_battery(painter: &egui::Painter, p: &Palette, rect: Rect, fill: f32, co
 
 /// Coarse reading: three segments meaning low / medium / full, matching the protocol's
 /// three levels exactly. No percentage is invented from them.
-fn coarse_pixel_battery(painter: &egui::Painter, p: &Palette, rect: Rect, level: CoarseLevel) {
+pub(crate) fn coarse_pixel_battery(
+    painter: &egui::Painter,
+    p: &Palette,
+    rect: Rect,
+    level: CoarseLevel,
+) {
     let cells = 3;
     let gap = 2.0;
     let filled = match level {

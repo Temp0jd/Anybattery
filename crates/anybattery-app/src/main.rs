@@ -15,6 +15,8 @@ mod theme;
 #[cfg(windows)]
 mod tray;
 #[cfg(windows)]
+mod tray_popup;
+#[cfg(windows)]
 mod widgets;
 
 #[cfg(windows)]

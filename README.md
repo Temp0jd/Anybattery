@@ -42,7 +42,7 @@ Windows 10/11 的 2.4G / 蓝牙设备电量托盘工具。Rust 编写，单 exe�
 |---|---|---|---|---|---|
 | Windows 蓝牙 PnP（经典/BLE） | BTHENUM / BTHLE 任意设备 | `DEVPKEY_BLUETOOTH_BATTERY` PnP 属性 | 1–100% / 未知 | ⚪ 系统/标准 | 纯只读系统属性；设备未暴露或值为 0 时不显示；不做主动 GATT。 |
 | 蓝牙 HFP / 服务节点合并 | 同一 ContainerId | BTHENUM 服务节点电量并入根卡 | 继承服务节点电量 / 未知 | ⚪ 系统/标准 | 零、空、全零 ContainerId 不合并；多个经典根只允许唯一经典根接收 HFP 数据；OPPO 已验证，其他型号未逐台验证。 |
-| OPPO Enco X3 | BTHENUM `DEV_407218C8A7BC`（系统节点，无公开 VID:PID） | Windows PnP + HFP ContainerId 合并 | 实测 90% / 100%；充电未知 | ✅ 本机验证 | `.pi/diag-hfp-merge.txt` 显示 100%，`.pi/diag-final-integration.txt` 显示 90%；HFP 单卡；当前 208 项 Windows 测试通过。 |
+| OPPO Enco X3 | BTHENUM `DEV_407218C8A7BC`（系统节点，无公开 VID:PID） | Windows PnP + HFP ContainerId 合并 | 实测 90% / 100%；充电未知 | ✅ 本机验证 | `.pi/diag-hfp-merge.txt` 显示 100%，`.pi/diag-final-integration.txt` 显示 90%；HFP 单卡；当前 209 项 Windows 测试通过。 |
 | Zero 1 | BTHLE `DEV_CC3D601F1B0C` | Windows BLE PnP | 实测 46%；充电未知 | ✅ 本机验证 | `.pi/diag-final-integration.txt`；GATT 服务节点归并到根卡；仍是 PnP 属性，不是主动 GATT。 |
 | 标准 HID Battery System | usage `0x0085:0x0064`、`0x0085:0x0065`，充电/放电 `0x44/0x45` | Feature/Input value | 百分比 / 充电、放电标志 | ⚪ 系统/标准 | 不再接受 `0x66` 或 `0x0001` 猜百分比；依赖设备描述符和 logical min/max。 |
 | 标准 HID Battery Strength / Digitizer | `0x0006:0x0020`、`0x000D:0x003B` | Feature/Input value | 百分比 / 无充电位则未知 | ⚪ 系统/标准 | 依赖描述符；没有标准充电 usage 时保持未知。 |
@@ -228,7 +228,7 @@ Razer 不是全系支持。下列型号必须同时命中 PID、vendor collectio
 
 | 型号 / 型号组 | VID:PID / 接口 | 协议 / 报文 | 电量 / 充电 | 状态 | 限制 / 证据 |
 |---|---|---|---|---|---|
-| DELUX M618Air（model `0x24`） | `1D57:FA60`，MI_02，`000A:0000`，input 5B | 被动 `03 24 40 01 <raw>`；官方 `0x4290b0 → 0x421b90` 档位映射 | raw `1/2/3/4-5/6-7/8..100` → `10/20/40/60/80/100`；state 01 按前版契约记为未充电（官方 handler 未解码充电位） | ✅ 本机验证 | 官方软件 raw6 显示 80%；`.pi/diag-final-integration.txt` 实扫 raw7 显示 80%，charging `Some(false)`，最终集成扫描 2.99 秒、30 秒硬超时内完成，devices=4/bluetooth=2/hid=9；当前 208 项 Windows 测试通过；state `02/03/80` 仍拒绝；名称保持中性。 |
+| DELUX M618Air（model `0x24`） | `1D57:FA60`，MI_02，`000A:0000`，input 5B | 被动 `03 24 40 01 <raw>`；官方 `0x4290b0 → 0x421b90` 档位映射 | raw `1/2/3/4-5/6-7/8..100` → `10/20/40/60/80/100`；state 01 按前版契约记为未充电（官方 handler 未解码充电位） | ✅ 本机验证 | 官方软件 raw6 显示 80%；`.pi/diag-final-integration.txt` 实扫 raw7 显示 80%，charging `Some(false)`，最终集成扫描 2.99 秒、30 秒硬超时内完成，devices=4/bluetooth=2/hid=9；当前 209 项 Windows 测试通过；state `02/03/80` 仍拒绝；名称保持中性。 |
 | 其他 1D57:FA60 / Beken 兼容设备 | `1D57:FA60`，MI_02，`000A:0000`，input 5B | 被动 `03 <id> 40 <state> <raw>` | `0x55` 直接；`0x10/0x85` ×10；其他直接；充电未知 | 🟡 社区协议 | 严格校验头、长度、range；不同 device ID 无品牌/型号承诺；`0x24` 只在 M618Air 证据上下文解释。 |
 
 ### 未支持 / 已排除
@@ -263,6 +263,7 @@ Razer 不是全系支持。下列型号必须同时命中 PID、vendor collectio
 - 开机自启（HKCU Run，默认关闭）
 - 默认只显示有电量的设备；可在设置中打开“显示无电池设备”
 - 单实例：第二次启动会唤起已有窗口，不会创建第二个托盘图标或第二份扫描
+- 托盘悬停摘要：鼠标在托盘图标上停留 250ms 后显示像素风小浮窗（设备数、有效读数、最低电量、最多 4 行设备、扫描时间）；非交互、鼠标穿透、不抢焦点，离开 180ms 后收起
 - 无网络请求、无遥测、不注入进程
 
 ## 构建
@@ -305,6 +306,7 @@ docs/                       设计图、截图与协议研究
 - ✅ 只表示本机扫描或官方校准过的少数项目；🟡 社区协议不等于全系兼容，🧪 运行时修复不等于稳定可用，具体以支持矩阵为准。
 - 通用 BLE 设备仍依赖 Windows PnP 电量属性，未主动连接 GATT；Apple Continuity 只额外监听广播并绑定当前已连接设备，不等于通用 GATT 支持。
 - 手动适配 MVP 只适用于会主动发出输入报文（input report）的 2.4G 设备；不会主动查询 Feature/Output，也不支持 JSON 导入、充电位、CRC/TLV、多报告状态机。方案与边界见 [docs/manual-2.4g-matching-plan.md](docs/manual-2.4g-matching-plan.md)。
+- 托盘悬停浮窗替代原生 tooltip；它是非交互的鼠标穿透窗口，不能点击、滚动或固定。混合 DPI、多显示器、任务栏四方向和 Explorer 重启后的表现仍需 Windows 真机验收；wine 只验证启动和纯逻辑。
 - 灵脉（FerrisPulse）电池协议的静态盘点见 [docs/protocol-research/ferrispulse-battery-inventory.md](docs/protocol-research/ferrispulse-battery-inventory.md)；清单不等于可直接导入的被动 profile。
 - 只有 Windows 真机能验证 HID / 蓝牙行为；Linux 侧可用 wine 跑 windows/app 的纯逻辑与 fixture 单测，但不覆盖真实驱动、固件或热插拔。
 - Corsair、Keychron、BlackShark / Barracuda Pro 的 Razer PA 已有生产 session/脚本传输测试，但仍无对应真机证据；Barracuda X (2022) 已单独完成本机验证。

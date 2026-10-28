@@ -11,6 +11,8 @@ mod hid;
 #[cfg(windows)]
 pub mod instance;
 #[cfg(windows)]
+pub mod monitor;
+#[cfg(windows)]
 mod passive;
 #[cfg(windows)]
 mod scan;

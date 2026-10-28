@@ -141,7 +141,7 @@ ContainerId + InstanceId + interface number + usage page/usage
 - core：`crates/anybattery-core/src/protocol.rs` 增加 `bias`（旧 JSON 默认 0，允许负 scale）；`crates/anybattery-core/src/user_protocol.rs` 提供 `InterfaceBinding`、`UserProtocolProfile`、两点校准、唯一匹配与安全子集校验。
 - windows：`passive.rs` 只读捕获；`user_profile.rs` 接口绑定、被动读数和 Unverified 快照；`scan.rs` 在内置 vendor 与标准 HID 之后才尝试用户 profile。
 - app：`protocol_wizard.rs` 提供选择接口、4 秒被动捕获、样本、offset/匹配头、预览和保存；`storage.rs` 提供 `protocols/*.json`、损坏隔离、导入强制禁用/未验证。
-- 测试：core 35、windows 208、app 27（GNU + wine）。仍需真机验证：只读句柄与厂商软件共存、真实 input 报文、取消/超时/拔插、高报告率、两台同 VID:PID 不串用。
+- 测试：core 35、windows 209、app 50（GNU + wine）。仍需真机验证：只读句柄与厂商软件共存、真实 input 报文、取消/超时/拔插、高报告率、两台同 VID:PID 不串用。
 
 ## 与后续迭代的关系
 

@@ -3,12 +3,13 @@ use crate::protocol_wizard::{ProtocolWizard, WizardAction};
 use crate::storage;
 use crate::theme::{self, Palette};
 use crate::tray::TrayHandle;
+use crate::tray_popup::{TrayHoverEvent, TrayPopupModel, TrayPopupState};
 use crate::widgets;
 use anybattery_core::{
     BatteryStatus, DeviceSnapshot, Settings, Theme, UserProfileCatalog, now_unix,
 };
 use anybattery_windows::{
-    HidInterface, ScanEvent, ScanResult, scan_with_profiles_and_progress, system,
+    HidInterface, ScanEvent, ScanResult, monitor, scan_with_profiles_and_progress, system,
 };
 use crossbeam_channel::{Receiver, Sender, TryRecvError, unbounded};
 use eframe::egui::{
@@ -21,8 +22,9 @@ use std::time::{Duration, Instant};
 pub enum UiCommand {
     Toggle,
     Show,
-    Refresh,
     Menu(String),
+    TrayHover(TrayHoverEvent),
+    DismissTrayPopup,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Page {
@@ -160,8 +162,9 @@ pub struct AnyBatteryApp {
     toast: Option<(String, Instant)>,
     counts: (usize, usize, usize),
     alert: Option<String>,
-    /// Last icon/tooltip tuple pushed to the tray, to avoid shell churn every scan.
-    last_tray: Option<(String, Option<u8>, bool)>,
+    /// Last icon tuple pushed to the tray, to avoid shell churn every scan.
+    last_tray: Option<(Option<u8>, bool)>,
+    tray_popup: TrayPopupState,
     profiles: Arc<UserProfileCatalog>,
     profile_store: storage::ProfileStore,
     profile_diagnostics: Vec<String>,
@@ -218,6 +221,7 @@ impl AnyBatteryApp {
             counts: (0, 0, 0),
             alert: None,
             last_tray: None,
+            tray_popup: TrayPopupState::new(),
             profiles,
             profile_store,
             profile_diagnostics,
@@ -522,26 +526,16 @@ impl AnyBatteryApp {
         let lowest = live
             .iter()
             .min_by_key(|device| device.percent().unwrap_or(255));
-        let tooltip = match lowest {
-            Some(device) => format!(
-                "AnyBattery · {} 台设备 · {} {}%",
-                self.devices.len(),
-                widgets::truncate(&device.name, 18),
-                device.percent().unwrap_or(0)
-            ),
-            None => format!("AnyBattery · {} 台设备", self.devices.len()),
-        };
-        // Without a live percentage device there is no level to show: fall back to the
-        // "no data" icon instead of leaving a stale previous reading in the tray.
+        // The custom hover popup replaces the native tooltip: keeping both would
+        // draw two overlapping summaries. Only the icon changes here.
         let (level, charging) = match lowest {
             Some(device) => (device.percent(), device.battery.charging() == Some(true)),
             None => (None, false),
         };
-        let next = (tooltip, level, charging);
+        let next = (level, charging);
         if self.last_tray.as_ref() == Some(&next) {
             return;
         }
-        let _ = tray.icon.set_tooltip(Some(next.0.clone()));
         if let Some(icon) = icons::tray_icon(level, charging) {
             if tray.icon.set_icon(Some(icon)).is_ok() {
                 self.last_tray = Some(next);
@@ -573,31 +567,35 @@ impl AnyBatteryApp {
                         self.hide(ctx);
                     }
                 }
-                UiCommand::Refresh => self.request_scan(),
-                UiCommand::Menu(id) => match id.as_str() {
-                    "show" => self.show(ctx),
-                    "refresh" => {
-                        self.show(ctx);
-                        self.request_scan();
+                UiCommand::TrayHover(event) => self.on_tray_hover(ctx, event),
+                UiCommand::DismissTrayPopup => self.dismiss_tray_popup(ctx),
+                UiCommand::Menu(id) => {
+                    self.dismiss_tray_popup(ctx);
+                    match id.as_str() {
+                        "show" => self.show(ctx),
+                        "refresh" => {
+                            self.show(ctx);
+                            self.request_scan();
+                        }
+                        "settings" => {
+                            self.page = Page::Settings;
+                            self.show(ctx);
+                        }
+                        "diagnostics" => {
+                            self.page = Page::Diagnostics;
+                            self.show(ctx);
+                        }
+                        "autostart" => {
+                            self.apply_autostart(!self.settings.autostart);
+                            self.save_settings();
+                        }
+                        "quit" => {
+                            self.quitting = true;
+                            ctx.send_viewport_cmd(ViewportCommand::Close);
+                        }
+                        _ => {}
                     }
-                    "settings" => {
-                        self.page = Page::Settings;
-                        self.show(ctx);
-                    }
-                    "diagnostics" => {
-                        self.page = Page::Diagnostics;
-                        self.show(ctx);
-                    }
-                    "autostart" => {
-                        self.apply_autostart(!self.settings.autostart);
-                        self.save_settings();
-                    }
-                    "quit" => {
-                        self.quitting = true;
-                        ctx.send_viewport_cmd(ViewportCommand::Close);
-                    }
-                    _ => {}
-                },
+                }
             }
         }
     }
@@ -613,6 +611,7 @@ impl AnyBatteryApp {
         }
     }
     fn show(&mut self, ctx: &egui::Context) {
+        self.dismiss_tray_popup(ctx);
         self.hidden = false;
         ctx.send_viewport_cmd(ViewportCommand::Visible(true));
         // A tray click must bring a minimized window back, not leave it in the taskbar.
@@ -621,8 +620,98 @@ impl AnyBatteryApp {
         ctx.request_repaint();
     }
     fn hide(&mut self, ctx: &egui::Context) {
+        self.dismiss_tray_popup(ctx);
         self.hidden = true;
         ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+    }
+    fn on_tray_hover(&mut self, ctx: &egui::Context, event: TrayHoverEvent) {
+        let was_visible = self.tray_popup.is_visible();
+        let old_anchor = self.tray_popup.anchor();
+        let changed = self.tray_popup.on_event(event, Instant::now(), self.hidden);
+        if !changed {
+            return;
+        }
+        let is_visible = self.tray_popup.is_visible();
+        let anchor_changed = old_anchor != self.tray_popup.anchor();
+        // A Move refreshes the 8s safety deadline; that alone must not force a
+        // full hidden-window pass on every mouse event.
+        if self.hidden && (was_visible != is_visible || anchor_changed) {
+            ctx.send_viewport_cmd(ViewportCommand::RequestPaintWhileHidden);
+        }
+        ctx.request_repaint();
+    }
+    fn dismiss_tray_popup(&mut self, ctx: &egui::Context) {
+        let was_visible = self.tray_popup.is_visible();
+        if self.tray_popup.dismiss() {
+            if self.hidden && was_visible {
+                ctx.send_viewport_cmd(ViewportCommand::RequestPaintWhileHidden);
+            }
+            ctx.request_repaint();
+        }
+    }
+    fn tick_tray_popup(&mut self, ctx: &egui::Context) {
+        let was_visible = self.tray_popup.is_visible();
+        let now = Instant::now();
+        let toggled = self.tray_popup.tick(now, self.hidden);
+        let is_visible = self.tray_popup.is_visible();
+        if toggled || was_visible != is_visible {
+            if self.hidden {
+                // Creating or removing a deferred child needs one complete pass,
+                // even while the root window is hidden.
+                ctx.send_viewport_cmd(ViewportCommand::RequestPaintWhileHidden);
+            }
+            ctx.request_repaint();
+        }
+        if let Some(deadline) = self.tray_popup.next_deadline() {
+            let wait = deadline.saturating_duration_since(now);
+            ctx.request_repaint_after(wait.max(Duration::from_millis(16)));
+        }
+        if is_visible && self.hidden {
+            // The popup holds an immutable snapshot, so a full pass is what
+            // republishes new scan results into the deferred callback.
+            ctx.send_viewport_cmd(ViewportCommand::RequestPaintWhileHidden);
+            // Keep “N 秒前完成扫描” current without a 1 Hz root repaint when idle.
+            ctx.request_repaint_after(Duration::from_secs(1));
+        }
+    }
+    fn sync_tray_popup(&mut self, ctx: &egui::Context) {
+        if !self.hidden || !self.tray_popup.is_visible() {
+            return;
+        }
+        let Some(anchor) = self.tray_popup.anchor() else {
+            return;
+        };
+        let monitor = monitor::work_area_at(anchor.center_x(), anchor.center_y())
+            .unwrap_or_else(|| fallback_monitor(ctx));
+        let zoom = ctx.zoom_factor();
+        let pixels_per_point = (monitor.scale * zoom).max(0.5);
+        let model = Arc::new(TrayPopupModel::from_devices(
+            self.dark,
+            &self.devices,
+            self.scanning,
+            self.scan_stalled,
+            self.scan_service_stopped,
+            self.last_scan,
+        ));
+        let size = egui::vec2(crate::tray_popup::POPUP_WIDTH, model.height());
+        let position = crate::tray_popup::place_popup(anchor, size, monitor, pixels_per_point);
+        let builder = egui::ViewportBuilder::default()
+            .with_title("AnyBattery")
+            .with_decorations(false)
+            .with_resizable(false)
+            .with_active(false)
+            .with_taskbar(false)
+            .with_mouse_passthrough(true)
+            .with_clamp_size_to_monitor_size(false)
+            .with_inner_size(size)
+            .with_min_inner_size(size)
+            .with_max_inner_size(size)
+            .with_position(position)
+            .with_window_level(egui::WindowLevel::AlwaysOnTop);
+        let viewport_id = egui::ViewportId::from_hash_of("anybattery-tray-popup");
+        ctx.show_viewport_deferred(viewport_id, builder, move |ui, _class| {
+            crate::tray_popup::show(ui, &model);
+        });
     }
     fn maybe_auto_scan(&mut self) {
         if self.wizard.is_capturing() {
@@ -1404,6 +1493,7 @@ impl eframe::App for AnyBatteryApp {
         }
         self.poll_results(ctx);
         self.check_scan_watchdog();
+        self.tick_tray_popup(ctx);
         self.maybe_auto_scan();
         self.maybe_refresh_theme(ctx);
         // While hidden to the tray, wake at the next poll deadline instead of at 1 Hz.
@@ -1454,9 +1544,26 @@ impl eframe::App for AnyBatteryApp {
             Page::ProtocolWizard => self.protocol_wizard_page(&mut child, &p),
         }
         self.paint_toast(&mut child, &p);
+        self.sync_tray_popup(child.ctx());
         self.resize_handles(ui, maximized);
     }
 }
+/// Fallback when Win32 monitor lookup fails: use the root window's monitor size
+/// in physical pixels, anchored at the virtual-desktop origin.
+fn fallback_monitor(ctx: &egui::Context) -> monitor::MonitorGeometry {
+    let scale = ctx.pixels_per_point().max(0.5);
+    let size = ctx
+        .input(|input| input.viewport().monitor_size)
+        .unwrap_or_else(|| egui::vec2(1920.0, 1080.0));
+    monitor::MonitorGeometry {
+        work_left: 0.0,
+        work_top: 0.0,
+        work_right: f64::from(size.x * scale),
+        work_bottom: f64::from(size.y * scale),
+        scale,
+    }
+}
+
 /// Final display order required by DESIGN 8.2: lowest known percentage first, then the most
 /// recently updated device, then the name. The scanner already applies a coarse
 /// `DeviceSnapshot::sort_key` order, but its status group does not express "most recent first"
