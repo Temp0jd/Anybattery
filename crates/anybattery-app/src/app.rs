@@ -1,10 +1,15 @@
 use crate::icons;
+use crate::protocol_wizard::{ProtocolWizard, WizardAction};
 use crate::storage;
 use crate::theme::{self, Palette};
 use crate::tray::TrayHandle;
 use crate::widgets;
-use anybattery_core::{BatteryStatus, DeviceSnapshot, Settings, Theme, now_unix};
-use anybattery_windows::{ScanResult, scan, system};
+use anybattery_core::{
+    BatteryStatus, DeviceSnapshot, Settings, Theme, UserProfileCatalog, now_unix,
+};
+use anybattery_windows::{
+    HidInterface, ScanEvent, ScanResult, scan_with_profiles_and_progress, system,
+};
 use crossbeam_channel::{Receiver, Sender, TryRecvError, unbounded};
 use eframe::egui::{
     self, Align, Align2, CornerRadius, CursorIcon, FontId, Id, Layout, PointerButton, Pos2, Rect,
@@ -24,6 +29,7 @@ pub enum Page {
     Devices,
     Settings,
     Diagnostics,
+    ProtocolWizard,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Filter {
@@ -58,20 +64,58 @@ impl Filter {
         }
     }
 }
+const SCAN_STALL_TIMEOUT: Duration = Duration::from_secs(20);
+
+struct ScanRequest {
+    id: u64,
+    settings: Settings,
+    profiles: Arc<UserProfileCatalog>,
+}
+
+enum ScanMessage {
+    Progress(u64),
+    Partial {
+        id: u64,
+        devices: Vec<DeviceSnapshot>,
+    },
+    Finished {
+        id: u64,
+        result: ScanResult,
+    },
+}
+
 struct DeviceService {
-    requests: Sender<Settings>,
-    results: Receiver<ScanResult>,
+    requests: Sender<ScanRequest>,
+    results: Receiver<ScanMessage>,
 }
 impl DeviceService {
     fn start() -> Self {
-        let (requests, request_rx) = unbounded::<Settings>();
-        let (result_tx, results) = unbounded::<ScanResult>();
+        let (requests, request_rx) = unbounded::<ScanRequest>();
+        let (result_tx, results) = unbounded::<ScanMessage>();
         std::thread::Builder::new()
             .name("anybattery-scan".to_owned())
             .spawn(move || {
-                while let Ok(settings) = request_rx.recv() {
-                    let result = scan(&settings);
-                    if result_tx.send(result).is_err() {
+                while let Ok(request) = request_rx.recv() {
+                    let id = request.id;
+                    let progress_tx = result_tx.clone();
+                    let result = {
+                        let mut on_event = |event: ScanEvent| {
+                            let message = match event {
+                                ScanEvent::Progress => ScanMessage::Progress(id),
+                                ScanEvent::Partial(devices) => ScanMessage::Partial { id, devices },
+                            };
+                            let _ = progress_tx.send(message);
+                        };
+                        scan_with_profiles_and_progress(
+                            &request.settings,
+                            &request.profiles,
+                            &mut on_event,
+                        )
+                    };
+                    if result_tx
+                        .send(ScanMessage::Finished { id, result })
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -87,6 +131,13 @@ pub struct AnyBatteryApp {
     page: Page,
     filter: Filter,
     scanning: bool,
+    /// Monotonic id for the request currently allowed to update the UI.
+    active_scan_id: Option<u64>,
+    next_scan_id: u64,
+    /// Last progress/partial message from the active scan; drives the stall watchdog.
+    last_progress: Instant,
+    /// A scan exceeded its idle-progress budget; a manual refresh restarts the worker.
+    scan_stalled: bool,
     /// A scan was requested while another one was running; run exactly one more when it ends.
     rescan_pending: bool,
     /// Set when the scan worker or its result channel has failed. Further work is suppressed
@@ -109,6 +160,13 @@ pub struct AnyBatteryApp {
     toast: Option<(String, Instant)>,
     counts: (usize, usize, usize),
     alert: Option<String>,
+    /// Last icon/tooltip tuple pushed to the tray, to avoid shell churn every scan.
+    last_tray: Option<(String, Option<u8>, bool)>,
+    profiles: Arc<UserProfileCatalog>,
+    profile_store: storage::ProfileStore,
+    profile_diagnostics: Vec<String>,
+    hid_interfaces: Vec<HidInterface>,
+    wizard: ProtocolWizard,
 }
 impl AnyBatteryApp {
     pub fn new(
@@ -127,13 +185,21 @@ impl AnyBatteryApp {
         }
         let animations = settings.animations;
         let service = DeviceService::start();
+        let profile_store = storage::ProfileStore::new();
+        let profile_load = profile_store.load();
+        let profiles = Arc::new(profile_load.catalog);
+        let profile_diagnostics = profile_load.diagnostics;
         let mut app = Self {
             settings,
             devices: Vec::new(),
             diagnostics: vec!["正在扫描设备…".to_owned()],
             page: Page::Devices,
             filter: Filter::All,
-            scanning: true,
+            scanning: false,
+            active_scan_id: None,
+            next_scan_id: 0,
+            last_progress: Instant::now(),
+            scan_stalled: false,
             rescan_pending: false,
             scan_service_stopped: false,
             poll_dragging: false,
@@ -151,18 +217,31 @@ impl AnyBatteryApp {
             toast: None,
             counts: (0, 0, 0),
             alert: None,
+            last_tray: None,
+            profiles,
+            profile_store,
+            profile_diagnostics,
+            hid_interfaces: Vec::new(),
+            wizard: ProtocolWizard::new(),
         };
         // The initial scan request is the first thing the worker thread receives.
-        if app.service.requests.send(app.settings.clone()).is_err() {
-            app.diagnostics.clear();
-            app.mark_scan_service_stopped("启动扫描线程失败");
-        }
+        app.start_scan();
         app.update_tray();
         app
     }
     /// Refresh now. While a scan is already running this is a no-op, so an impatient click can
-    /// never stack more expensive HID scans. Display-setting changes use [`Self::queue_rescan`].
+    /// never stack more expensive HID scans. Display-setting changes use queue_rescan.
     fn request_scan(&mut self) {
+        if self.wizard.is_capturing() {
+            self.toast("被动捕获进行中，等捕获结束后再刷新".to_owned());
+            return;
+        }
+        if self.scan_stalled {
+            // The old worker may still be blocked in a synchronous HID call.
+            // Give the user an explicit retry that abandons its channel.
+            self.restart_scan_service();
+            return;
+        }
         if self.scan_service_stopped {
             self.toast("扫描线程已停止，请重新启动应用".to_owned());
             return;
@@ -175,6 +254,13 @@ impl AnyBatteryApp {
     /// Record at most one follow-up scan for a change that affects what the scan must return
     /// (for example "show devices without a battery"). When idle it starts immediately.
     fn queue_rescan(&mut self) {
+        if self.wizard.is_capturing() {
+            return;
+        }
+        if self.scan_stalled {
+            self.restart_scan_service();
+            return;
+        }
         if self.scan_service_stopped {
             self.toast("扫描线程已停止，请重新启动应用".to_owned());
             return;
@@ -186,9 +272,55 @@ impl AnyBatteryApp {
         }
     }
     fn start_scan(&mut self) {
-        match self.service.requests.send(self.settings.clone()) {
-            Ok(()) => self.scanning = true,
+        self.next_scan_id = self.next_scan_id.wrapping_add(1);
+        let id = self.next_scan_id;
+        let request = ScanRequest {
+            id,
+            settings: self.settings.clone(),
+            profiles: self.profiles.clone(),
+        };
+        match self.service.requests.send(request) {
+            Ok(()) => {
+                self.scanning = true;
+                self.scan_stalled = false;
+                self.active_scan_id = Some(id);
+                self.last_progress = Instant::now();
+            }
             Err(_) => self.mark_scan_service_stopped("发送扫描请求失败"),
+        }
+    }
+    /// Abandon a stalled worker. The old thread may still be blocked in a
+    /// synchronous HID call, but its result channel is dropped, so it cannot
+    /// update this UI; a new worker gets a fresh channel and scan id.
+    fn restart_scan_service(&mut self) {
+        self.service = DeviceService::start();
+        self.scan_service_stopped = false;
+        self.scan_stalled = false;
+        self.scanning = false;
+        self.rescan_pending = false;
+        self.active_scan_id = None;
+        self.start_scan();
+    }
+    fn mark_scan_stalled(&mut self) {
+        if self.scan_stalled {
+            return;
+        }
+        self.scan_stalled = true;
+        self.scanning = false;
+        self.rescan_pending = false;
+        self.toast("扫描超时：某个设备没有响应，点击刷新重试".to_owned());
+        self.diagnostics.retain(|line| line != "正在扫描设备…");
+        self.diagnostics.insert(
+            0,
+            format!(
+                "扫描超时：{} 秒内没有进度；同步 HID 调用可能被驱动阻塞",
+                SCAN_STALL_TIMEOUT.as_secs()
+            ),
+        );
+    }
+    fn check_scan_watchdog(&mut self) {
+        if self.scanning && self.last_progress.elapsed() > SCAN_STALL_TIMEOUT {
+            self.mark_scan_stalled();
         }
     }
     /// Leave the scanning state once, report it through the existing Chinese toast/diagnostics
@@ -199,8 +331,11 @@ impl AnyBatteryApp {
         }
         self.scan_service_stopped = true;
         self.scanning = false;
+        self.scan_stalled = false;
         self.rescan_pending = false;
+        self.active_scan_id = None;
         self.toast("扫描线程已停止，无法继续刷新设备".to_owned());
+        self.diagnostics.retain(|line| line != "正在扫描设备…");
         self.diagnostics
             .insert(0, format!("扫描线程已停止：{}", detail));
     }
@@ -210,24 +345,63 @@ impl AnyBatteryApp {
         }
         loop {
             match self.service.results.try_recv() {
-                Ok(result) => {
+                Ok(ScanMessage::Progress(id)) => {
+                    if self.active_scan_id == Some(id) {
+                        self.last_progress = Instant::now();
+                        if self.scan_stalled {
+                            self.scan_stalled = false;
+                            self.scanning = true;
+                        }
+                    }
+                }
+                Ok(ScanMessage::Partial { id, devices }) => {
+                    if self.active_scan_id == Some(id) {
+                        self.last_progress = Instant::now();
+                        if self.scan_stalled {
+                            self.scan_stalled = false;
+                            self.scanning = true;
+                        }
+                        self.merge_partial(devices);
+                        ctx.request_repaint();
+                    }
+                }
+                Ok(ScanMessage::Finished { id, result }) => {
+                    if self.active_scan_id != Some(id) {
+                        continue;
+                    }
+                    self.active_scan_id = None;
                     self.scanning = false;
+                    self.scan_stalled = false;
+                    self.last_scan = Some(Instant::now());
                     // Apply changes made during the scan once, with the settings that are current now.
                     if self.rescan_pending {
                         self.rescan_pending = false;
                         self.start_scan();
                     }
-                    self.last_scan = Some(Instant::now());
-                    self.devices = result.devices;
+                    let ScanResult {
+                        devices,
+                        diagnostics: scan_diagnostics,
+                        bluetooth_count,
+                        hid_count,
+                        hid_interfaces,
+                    } = result;
+                    self.devices = devices;
                     sort_devices_for_display(&mut self.devices);
-                    let mut diagnostics = Vec::with_capacity(result.diagnostics.len() + 2);
+                    let old_interfaces = std::mem::take(&mut self.hid_interfaces);
+                    self.wizard
+                        .on_interfaces_changed(&old_interfaces, &hid_interfaces);
+                    self.hid_interfaces = hid_interfaces;
+                    let mut diagnostics = Vec::with_capacity(scan_diagnostics.len() + 4);
                     diagnostics.push(format!(
                         "扫描完成：{} 台设备，{} 个蓝牙节点，{} 个 HID 接口",
                         self.devices.len(),
-                        result.bluetooth_count,
-                        result.hid_count
+                        bluetooth_count,
+                        hid_count
                     ));
-                    diagnostics.extend(result.diagnostics);
+                    diagnostics.extend(scan_diagnostics);
+                    // Profile load errors must survive the next scan, which replaces
+                    // the whole diagnostics vector.
+                    diagnostics.extend(self.profile_diagnostics.clone());
                     self.diagnostics = diagnostics;
                     self.update_counts();
                     self.update_tray();
@@ -241,6 +415,75 @@ impl AnyBatteryApp {
                 }
             }
         }
+    }
+    fn reload_profiles(&mut self) {
+        let load = self.profile_store.load();
+        self.profiles = Arc::new(load.catalog);
+        self.profile_diagnostics = load.diagnostics;
+    }
+    fn protocol_wizard_page(&mut self, ui: &mut Ui, p: &Palette) {
+        let busy = self.scanning || self.scan_stalled;
+        let action = self.wizard.show(
+            ui,
+            p,
+            &self.hid_interfaces,
+            self.profiles.profiles(),
+            &self.profile_diagnostics,
+            busy,
+        );
+        match action {
+            WizardAction::None => {}
+            WizardAction::Close => {
+                self.wizard.cancel_capture();
+                self.page = Page::Settings;
+            }
+            WizardAction::Save(profile) => {
+                // Reconfiguring the same interface replaces its previous profile
+                // instead of creating an ambiguous pair that load() must disable.
+                if let Some(existing) = self
+                    .profiles
+                    .profiles()
+                    .iter()
+                    .find(|existing| existing.binding.same_interface(&profile.binding))
+                {
+                    if existing.spec.id != profile.spec.id {
+                        let _ = self.profile_store.delete(&existing.spec.id);
+                    }
+                }
+                match self.profile_store.save(&profile) {
+                    Ok(()) => {
+                        self.reload_profiles();
+                        self.wizard.reset_after_save();
+                        self.queue_rescan();
+                        self.toast("手动适配配置已保存（未验证）".to_owned());
+                    }
+                    Err(err) => self.toast(err),
+                }
+            }
+            WizardAction::Toggle { id, enabled } => {
+                match self.profile_store.set_enabled(&id, enabled) {
+                    Ok(()) => {
+                        self.reload_profiles();
+                        self.queue_rescan();
+                    }
+                    Err(err) => self.toast(err),
+                }
+            }
+            WizardAction::Delete(id) => match self.profile_store.delete(&id) {
+                Ok(()) => {
+                    self.reload_profiles();
+                    self.queue_rescan();
+                    self.toast("用户配置已删除".to_owned());
+                }
+                Err(err) => self.toast(err),
+            },
+        }
+    }
+    /// Merge a partial scan into the visible list without dropping devices that
+    /// have not been reached by this scan yet. The final result replaces the list.
+    fn merge_partial(&mut self, devices: Vec<DeviceSnapshot>) {
+        merge_device_list(&mut self.devices, devices);
+        self.update_counts();
     }
     fn update_counts(&mut self) {
         let mut bluetooth = 0;
@@ -288,15 +531,21 @@ impl AnyBatteryApp {
             ),
             None => format!("AnyBattery · {} 台设备", self.devices.len()),
         };
-        let _ = tray.icon.set_tooltip(Some(tooltip));
         // Without a live percentage device there is no level to show: fall back to the
         // "no data" icon instead of leaving a stale previous reading in the tray.
         let (level, charging) = match lowest {
             Some(device) => (device.percent(), device.battery.charging() == Some(true)),
             None => (None, false),
         };
+        let next = (tooltip, level, charging);
+        if self.last_tray.as_ref() == Some(&next) {
+            return;
+        }
+        let _ = tray.icon.set_tooltip(Some(next.0.clone()));
         if let Some(icon) = icons::tray_icon(level, charging) {
-            let _ = tray.icon.set_icon(Some(icon));
+            if tray.icon.set_icon(Some(icon)).is_ok() {
+                self.last_tray = Some(next);
+            }
         }
     }
     fn toast(&mut self, message: String) {
@@ -376,7 +625,10 @@ impl AnyBatteryApp {
         ctx.send_viewport_cmd(ViewportCommand::Visible(false));
     }
     fn maybe_auto_scan(&mut self) {
-        if self.scan_service_stopped || self.scanning {
+        if self.wizard.is_capturing() {
+            return;
+        }
+        if self.scan_service_stopped || self.scan_stalled || self.scanning {
             return;
         }
         let due = self
@@ -654,7 +906,12 @@ impl AnyBatteryApp {
                     .layout(Layout::left_to_right(Align::Center)),
             );
             if widgets::icon_button(&mut back, p, widgets::Glyph::Back, "返回").clicked() {
-                self.page = Page::Devices;
+                self.wizard.cancel_capture();
+                self.page = if self.page == Page::ProtocolWizard {
+                    Page::Settings
+                } else {
+                    Page::Devices
+                };
             }
             title_left += 36.0;
         }
@@ -679,6 +936,10 @@ impl AnyBatteryApp {
             ),
             Page::Settings => ("设置".to_owned(), "刷新、通知与外观".to_owned()),
             Page::Diagnostics => ("诊断".to_owned(), "扫描结果与设备接口".to_owned()),
+            Page::ProtocolWizard => (
+                "手动适配".to_owned(),
+                "被动监听 2.4G 接口并校准电量".to_owned(),
+            ),
         };
         let title_width = (bar.right() - 78.0 - title_left).max(40.0);
         let painter = ui.painter();
@@ -951,6 +1212,23 @@ impl AnyBatteryApp {
                     }
                 });
                 ui.add_space(14.0);
+                widgets::section_title(ui, p, "手动适配");
+                widgets::group(ui, p, |ui| {
+                    ui.label(theme::rich(
+                        format!(
+                            "用户配置 {} 个（启用 {} 个）· 只读被动监听，不发送查询/写入",
+                            self.profiles.profiles().len(),
+                            self.profiles.enabled_profiles().count()
+                        ),
+                        10.5,
+                        p.secondary,
+                        false,
+                    ));
+                    if widgets::pill_button(ui, p, "打开手动适配向导", false).clicked() {
+                        self.page = Page::ProtocolWizard;
+                    }
+                });
+                ui.add_space(14.0);
                 ui.horizontal(|ui| {
                     if widgets::pill_button(ui, p, "打开配置目录", false).clicked() {
                         let _ = std::process::Command::new("explorer")
@@ -988,6 +1266,11 @@ impl AnyBatteryApp {
             if widgets::pill_button(ui, p, "打开配置目录", false).clicked() {
                 let _ = std::process::Command::new("explorer")
                     .arg(storage::data_dir())
+                    .spawn();
+            }
+            if widgets::pill_button(ui, p, "打开日志目录", false).clicked() {
+                let _ = std::process::Command::new("explorer")
+                    .arg(crate::logging::log_dir())
                     .spawn();
             }
         });
@@ -1108,6 +1391,10 @@ impl eframe::App for AnyBatteryApp {
     }
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.process_commands(ctx);
+        if self.page != Page::ProtocolWizard && self.wizard.is_capturing() {
+            self.wizard.cancel_capture();
+        }
+        self.wizard.poll_capture();
         if ctx.input(|i| i.viewport().close_requested()) && !self.quitting {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             self.hide(ctx);
@@ -1116,9 +1403,24 @@ impl eframe::App for AnyBatteryApp {
             return;
         }
         self.poll_results(ctx);
+        self.check_scan_watchdog();
         self.maybe_auto_scan();
         self.maybe_refresh_theme(ctx);
-        ctx.request_repaint_after(Duration::from_secs(1));
+        // While hidden to the tray, wake at the next poll deadline instead of at 1 Hz.
+        // Tray/command wake closures still request an immediate repaint.
+        let repaint = if self.hidden && !self.scanning && !self.scan_stalled {
+            let since = self
+                .last_scan
+                .map(|last| last.elapsed())
+                .unwrap_or_default();
+            self.settings
+                .poll_interval()
+                .saturating_sub(since)
+                .max(Duration::from_secs(1))
+        } else {
+            Duration::from_secs(1)
+        };
+        ctx.request_repaint_after(repaint);
     }
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         if self.quitting {
@@ -1149,6 +1451,7 @@ impl eframe::App for AnyBatteryApp {
             Page::Devices => self.devices_page(&mut child, &p),
             Page::Settings => self.settings_page(&mut child, &p),
             Page::Diagnostics => self.diagnostics_page(&mut child, &p),
+            Page::ProtocolWizard => self.protocol_wizard_page(&mut child, &p),
         }
         self.paint_toast(&mut child, &p);
         self.resize_handles(ui, maximized);
@@ -1183,6 +1486,22 @@ fn compare_devices_for_display(a: &DeviceSnapshot, b: &DeviceSnapshot) -> Orderi
 
 fn sort_devices_for_display(devices: &mut [DeviceSnapshot]) {
     devices.sort_by(compare_devices_for_display);
+}
+
+/// Merge newly read cards by device id. Devices that this scan phase has not
+/// reached yet stay visible until the final result replaces the list.
+fn merge_device_list(devices: &mut Vec<DeviceSnapshot>, partial: Vec<DeviceSnapshot>) {
+    for device in partial {
+        if let Some(existing) = devices
+            .iter_mut()
+            .find(|existing| existing.id.0 == device.id.0)
+        {
+            *existing = device;
+        } else {
+            devices.push(device);
+        }
+    }
+    sort_devices_for_display(devices);
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1282,6 +1601,22 @@ mod tests {
             names(&devices),
             ["New", "Old", "Alpha", "Zeta", "High", "Unknown"]
         );
+    }
+
+    #[test]
+    fn partial_merge_keeps_unseen_devices_and_updates_existing() {
+        let mut devices = vec![sample("Alpha", Some(50), 1), sample("Beta", Some(80), 2)];
+        merge_device_list(
+            &mut devices,
+            vec![sample("Alpha", Some(40), 3), sample("Gamma", Some(90), 4)],
+        );
+        assert_eq!(names(&devices), ["Alpha", "Beta", "Gamma"]);
+        let alpha = devices
+            .iter()
+            .find(|device| device.name == "Alpha")
+            .expect("alpha present");
+        assert_eq!(alpha.percent(), Some(40));
+        assert_eq!(alpha.updated_at_unix, Some(3));
     }
 
     #[test]

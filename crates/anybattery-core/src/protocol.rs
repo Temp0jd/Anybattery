@@ -107,6 +107,9 @@ pub struct Field {
     pub value_type: FieldType,
     #[serde(default = "default_scale")]
     pub scale: f32,
+    /// 加法校准项：level = raw * scale + bias。旧 JSON 缺省为 0。
+    #[serde(default)]
+    pub bias: f32,
     pub min: Option<f32>,
     pub max: Option<f32>,
 }
@@ -154,8 +157,10 @@ pub enum ProtocolError {
     Timeout,
     #[error("重试次数必须 <= 5")]
     Retries,
-    #[error("字段缩放必须为有限正数")]
+    #[error("字段缩放必须为有限且非零数")]
     Scale,
+    #[error("字段偏置必须为有限数")]
+    Bias,
     #[error("字段 min/max 非法")]
     Bounds,
 }
@@ -241,7 +246,7 @@ impl ProtocolSpec {
         let Some(raw) = read_field(report, &self.extract.level)? else {
             return Ok(None);
         };
-        let value = raw * self.extract.level.scale;
+        let value = raw * self.extract.level.scale + self.extract.level.bias;
         if !value.is_finite() {
             return Ok(None);
         }
@@ -273,8 +278,11 @@ impl ProtocolSpec {
 }
 
 fn validate_field(field: &Field) -> Result<(), ProtocolError> {
-    if !field.scale.is_finite() || field.scale <= 0.0 {
+    if !field.scale.is_finite() || field.scale == 0.0 {
         return Err(ProtocolError::Scale);
+    }
+    if !field.bias.is_finite() {
+        return Err(ProtocolError::Bias);
     }
     if let (Some(min), Some(max)) = (field.min, field.max) {
         if min > max {
@@ -383,6 +391,41 @@ mod tests {
             ProtocolSpec::from_json(&bad),
             Err(ProtocolError::Schema(2))
         ));
+    }
+
+    #[test]
+    fn field_bias_defaults_to_zero_for_legacy_json() {
+        let spec = ProtocolSpec::from_json(SAMPLE).unwrap();
+        assert_eq!(spec.extract.level.bias, 0.0);
+        let mut report = [0u8; 16];
+        report[1] = 0x72;
+        report[5] = 0x07;
+        report[7] = 62;
+        assert_eq!(spec.extract_level(&report).unwrap(), Some(62));
+    }
+
+    #[test]
+    fn extract_level_applies_scale_then_bias() {
+        let mut spec = ProtocolSpec::from_json(SAMPLE).unwrap();
+        spec.extract.level.scale = -2.0;
+        spec.extract.level.bias = 120.0;
+        let mut report = [0u8; 16];
+        report[1] = 0x72;
+        report[5] = 0x07;
+        report[7] = 20;
+        assert_eq!(spec.extract_level(&report).unwrap(), Some(80));
+    }
+
+    #[test]
+    fn field_rejects_zero_scale_and_non_finite_bias() {
+        let mut spec = ProtocolSpec::from_json(SAMPLE).unwrap();
+        spec.extract.level.scale = 0.0;
+        assert_eq!(spec.validate(), Err(ProtocolError::Scale));
+        spec.extract.level.scale = -1.0;
+        spec.extract.level.bias = f32::INFINITY;
+        assert_eq!(spec.validate(), Err(ProtocolError::Bias));
+        spec.extract.level.bias = 0.0;
+        assert_eq!(spec.validate(), Ok(()));
     }
 
     #[test]

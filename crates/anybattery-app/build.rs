@@ -18,6 +18,11 @@ fn main() {
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
+    // The .res stream is an MSVC/COFF resource, not a GNU ld input.  Release
+    // builds use the MSVC target; GNU is only a test/compile target here.
+    if env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc") {
+        return;
+    }
 
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("manifest dir"));
     let source = fs::read_to_string(manifest.join("assets/anybattery-icon.pixels"))
@@ -34,7 +39,10 @@ fn main() {
     let res = build_resource(&images);
     let res_path = out.join("AnyBattery.res");
     fs::write(&res_path, &res).expect("write generated resource");
-    println!("cargo:rustc-link-arg-bins={}", res_path.display());
+    // Link the icon resource only into the real application binary.  A bare
+    // `rustc-link-arg-bins` also applies to the generated test harness, whose
+    // GNU linker rejects the MSVC-style .res stream.
+    println!("cargo:rustc-link-arg-bin=AnyBattery={}", res_path.display());
 }
 
 fn parse_pixel_map(source: &str) -> Vec<Vec<char>> {

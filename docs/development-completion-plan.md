@@ -3,10 +3,12 @@
 日期：2026-10-27  
 分工：主代理负责规划、证据审查、集成与验收；实现 worker 使用 `command-code/deepseek/deepseek-v4.1-flash`。每个阶段单独修改、单独审查，不把 UI、协议和发布改动混成一个不可回退的大 diff。
 
+> 2026-10-28 更新：单实例、文件日志/panic hook、分阶段扫描 + 看门狗、用户被动 2.4G 适配 MVP 已实现；当前测试为 core 35、windows 208（GNU + wine）、app 27。下表保留当时的基线判断，最新状态以上述更新和 README 为准。
+
 ## 1. 已核实基线
 
 - 起始 HEAD：`70906c7`，工作区干净。
-- `cargo test -p anybattery-core`：12 项通过。
+- `cargo test -p anybattery-core`：13 项通过。
 - Linux `cargo test --workspace --all-targets`：因宿主缺少 `gdk-pixbuf-2.0` 停在系统依赖构建，不能据此判断 Windows 应用代码失败。
 - 已准备 `cargo-xwin 0.23.1`、`x86_64-pc-windows-msvc` target、clang/lld；Windows 交叉检查在 worker 修改完成后执行。
 - 当前环境不能替代 Windows 真机：托盘、通知、DPI、HID、蓝牙、睡眠唤醒与长时运行均需单独验收。

@@ -1,7 +1,7 @@
 use std::ffi::c_void;
 use windows::Win32::Foundation::ERROR_SUCCESS;
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
-use windows::core::{PCWSTR, w};
+use windows::core::w;
 
 /// Reads HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize\AppsUseLightTheme.
 /// Returns true when the system is in dark mode (value 0).

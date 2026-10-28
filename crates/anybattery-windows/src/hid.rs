@@ -186,7 +186,9 @@ fn inspect(path: &str) -> Option<HidInterface> {
         caps_ok = unsafe { HidP_GetCaps(preparsed, &mut caps) } == HIDP_STATUS_SUCCESS;
         unsafe { HidD_FreePreparsedData(preparsed) };
     }
-    unsafe { CloseHandle(handle) };
+    unsafe {
+        let _ = CloseHandle(handle);
+    };
 
     if !has_attrs && !caps_ok && product.is_empty() {
         return None;
@@ -256,7 +258,9 @@ pub fn open_path(path: &str, write: bool) -> Option<HANDLE> {
 pub fn with_handle<T>(path: &str, write: bool, f: impl FnOnce(HANDLE) -> Option<T>) -> Option<T> {
     let handle = open_path(path, write)?;
     let result = f(handle);
-    unsafe { CloseHandle(handle) };
+    unsafe {
+        let _ = CloseHandle(handle);
+    };
     result
 }
 

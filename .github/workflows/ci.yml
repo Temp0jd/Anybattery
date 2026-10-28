@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  linux-check:
+    name: fmt + core tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo test -p anybattery-core
+      - run: cargo clippy -p anybattery-core --all-targets -- -D warnings
+
+  windows-gnu-test:
+    name: windows-gnu tests (wine)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+      - uses: Swatinem/rust-cache@v2
+      - name: Install wine and mingw
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends wine64 mingw-w64
+          WINERUNNER=$(command -v wine64 || command -v wine)
+          if [ -z "$WINERUNNER" ]; then
+            echo "wine runner not found" >&2
+            exit 1
+          fi
+          echo "CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUNNER=$WINERUNNER" >> "$GITHUB_ENV"
+          echo "WINEDEBUG=-all" >> "$GITHUB_ENV"
+      - name: Windows crate tests
+        run: cargo test -p anybattery-windows --target x86_64-pc-windows-gnu
+      - name: App logic tests
+        run: cargo test -p anybattery-app --target x86_64-pc-windows-gnu
+      - name: GNU release build
+        run: cargo build -p anybattery-app --target x86_64-pc-windows-gnu --release
+
+  windows-msvc:
+    name: MSVC tests + release build
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Workspace tests
+        run: cargo test --workspace
+      - name: Release build
+        run: cargo build --release -p anybattery-app
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/AnyBattery.exe dist/
+          Compress-Archive -Path dist/AnyBattery.exe -DestinationPath dist/AnyBattery-win64.zip -Force
+          $hash = (Get-FileHash dist/AnyBattery.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  AnyBattery.exe" | Out-File -Encoding ascii dist/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AnyBattery-win64
+          path: dist/*
+          if-no-files-found: error

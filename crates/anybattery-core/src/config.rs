@@ -58,11 +58,10 @@ impl Default for Settings {
 impl Settings {
     pub fn validate(&mut self) {
         self.poll_secs = self.poll_secs.clamp(MIN_POLL_SECS, MAX_POLL_SECS);
-        self.low_threshold = self.low_threshold.clamp(1, 100);
-        self.critical_threshold = self
-            .critical_threshold
-            .min(self.low_threshold.saturating_sub(1))
-            .max(1);
+        // A critical tier must stay strictly below the low tier.  With
+        // low < 2 there is no room for it, so clamp low to 2 first.
+        self.low_threshold = self.low_threshold.clamp(2, 100);
+        self.critical_threshold = self.critical_threshold.clamp(1, self.low_threshold - 1);
     }
 
     pub fn poll_interval(&self) -> std::time::Duration {
@@ -100,5 +99,25 @@ mod tests {
         };
         s.validate();
         assert!(s.critical_threshold < s.low_threshold);
+    }
+
+    #[test]
+    fn low_threshold_never_collides_with_critical() {
+        let mut s = Settings {
+            low_threshold: 1,
+            critical_threshold: 1,
+            ..Default::default()
+        };
+        s.validate();
+        assert_eq!(s.low_threshold, 2);
+        assert_eq!(s.critical_threshold, 1);
+
+        let mut s = Settings {
+            low_threshold: 2,
+            critical_threshold: 0,
+            ..Default::default()
+        };
+        s.validate();
+        assert_eq!(s.critical_threshold, 1);
     }
 }
