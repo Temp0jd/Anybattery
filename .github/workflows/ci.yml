@@ -41,12 +41,19 @@ jobs:
       - name: Install wine and mingw
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends wine64 mingw-w64
-          WINERUNNER=$(command -v wine64 || command -v wine)
+          # Ubuntu's wine64 package sometimes exits non-zero from post-install
+          # triggers even though the binary is installed; verify it below.
+          sudo apt-get install -y --no-install-recommends wine64 mingw-w64 || true
+          WINERUNNER=$(command -v wine || command -v wine64 || true)
+          if [ -z "$WINERUNNER" ]; then
+            WINERUNNER=$(find /usr/lib/wine /usr/lib/x86_64-linux-gnu/wine /usr/bin \
+              -maxdepth 2 -type f -name wine64 -perm -111 2>/dev/null | head -1)
+          fi
           if [ -z "$WINERUNNER" ]; then
             echo "wine runner not found" >&2
             exit 1
           fi
+          echo "Using wine runner: $WINERUNNER"
           echo "CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUNNER=$WINERUNNER" >> "$GITHUB_ENV"
           echo "WINEDEBUG=-all" >> "$GITHUB_ENV"
       - name: Windows crate tests
