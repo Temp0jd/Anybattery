@@ -536,6 +536,39 @@ impl ProtocolWizard {
         Ok(profile)
     }
 
+    /// Wide and narrow save rows share this so both hand off exactly the same profile.
+    fn submit_save(
+        &mut self,
+        info: &HidInterface,
+        calibration: Calibration,
+        action: &mut WizardAction,
+    ) {
+        match self.build_profile(info, calibration) {
+            Ok(profile) => *action = WizardAction::Save(profile),
+            Err(err) => self.error = Some(err),
+        }
+    }
+
+    /// 启用/禁用与删除按钮；窄窗和宽窗共用，行为完全一致。
+    fn profile_buttons(
+        &mut self,
+        ui: &mut Ui,
+        p: &Palette,
+        profile: &UserProtocolProfile,
+        action: &mut WizardAction,
+    ) {
+        let label = if profile.enabled { "禁用" } else { "启用" };
+        if widgets::pill_button(ui, p, label, false).clicked() {
+            *action = WizardAction::Toggle {
+                id: profile.spec.id.clone(),
+                enabled: !profile.enabled,
+            };
+        }
+        if widgets::pill_button(ui, p, "删除", false).clicked() {
+            self.pending_delete = Some(profile.spec.id.clone());
+        }
+    }
+
     fn preview(&self, info: &HidInterface, calibration: Calibration) -> Result<Preview, String> {
         let profile = self.build_profile(info, calibration)?;
         let mut valid = 0usize;
@@ -567,16 +600,21 @@ impl ProtocolWizard {
         self.poll();
         let mut action = WizardAction::None;
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
+        // 320px 下按钮和只读说明不能硬挤在一行：换行推进，说明自然折到下一行。
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
             if widgets::pill_button(ui, p, "返回设置", false).clicked() {
                 action = WizardAction::Close;
             }
-            ui.label(theme::rich(
-                "只读：只监听设备已经发出的输入报文，不发送任何查询/写入命令",
-                10.5,
-                p.tertiary,
-                false,
-            ));
+            ui.add(
+                egui::Label::new(theme::rich(
+                    "只读：只监听设备已经发出的输入报文，不发送任何查询/写入命令",
+                    10.5,
+                    p.tertiary,
+                    false,
+                ))
+                .wrap(),
+            );
         });
         if let Some(error) = &self.error {
             ui.label(theme::rich(error, 11.0, p.red, false));
@@ -634,9 +672,11 @@ impl ProtocolWizard {
                             ));
                         } else {
                             let mut chosen = self.selected;
+                            // 占满分组内容宽度；选中项用省略号收住，320px 下也不会横向溢出。
                             ComboBox::from_id_salt("user-profile-interface")
                                 .selected_text(selected_text)
-                                .width(ui.available_width() - 16.0)
+                                .width(ui.available_width())
+                                .truncate()
                                 .show_ui(ui, |ui| {
                                     for (index, label) in &candidates {
                                         ui.selectable_value(&mut chosen, Some(*index), label);
@@ -650,7 +690,7 @@ impl ProtocolWizard {
                         }
                         if let Some(info) = self.selected_info(interfaces) {
                             if let Ok(binding) = binding_for(info) {
-                                ui.label(theme::rich(
+                                wrapped_label(ui, theme::rich(
                                     format!(
                                         "容器 {} · 实例 {} · 输入 {} B",
                                         widgets::truncate(&binding.container_id, 18),
@@ -665,7 +705,7 @@ impl ProtocolWizard {
                         }
                     }
                 });
-                ui.add_space(10.0);
+                ui.add_space(8.0);
 
                 let selected = self.selected_info(interfaces).cloned();
                 widgets::section_title(ui, p, "2. 被动捕获");
@@ -680,37 +720,48 @@ impl ProtocolWizard {
                         return;
                     };
                     if self.capture_active {
-                        ui.label(theme::rich(
-                            format!(
-                                "捕获中… 已收到 {} 份报文（约 {} 秒）",
-                                self.capture_count,
-                                CAPTURE_WINDOW.as_secs()
-                            ),
-                            11.5,
-                            p.text,
-                            false,
-                        ));
-                        if widgets::pill_button(ui, p, "取消捕获", false).clicked() {
-                            self.cancel_capture();
-                        }
+                        // 状态文字与取消按钮允许换行，320px 下不会互相压住。
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(theme::rich(
+                                format!(
+                                    "捕获中… 已收到 {} 份报文（约 {} 秒）",
+                                    self.capture_count,
+                                    CAPTURE_WINDOW.as_secs()
+                                ),
+                                11.5,
+                                p.text,
+                                false,
+                            ));
+                            if widgets::pill_button(ui, p, "取消捕获", false).clicked() {
+                                self.cancel_capture();
+                            }
+                        });
                         if self.capture_cancelling {
                             ui.label(theme::rich("正在取消…", 10.5, p.tertiary, false));
                         }
                     } else {
                         let enabled = !scan_busy;
-                        if widgets::pill_button_enabled(ui, p, "开始 4 秒被动捕获", false, enabled)
-                            .clicked()
-                        {
-                            self.start_capture(info, scan_busy);
-                        }
-                        if scan_busy {
-                            ui.label(theme::rich(
-                                "扫描进行中；等扫描结束后再捕获，避免争用 HID 接口。",
-                                10.5,
-                                p.tertiary,
+                        ui.horizontal_wrapped(|ui| {
+                            if widgets::pill_button_enabled(
+                                ui,
+                                p,
+                                "开始 4 秒被动捕获",
                                 false,
-                            ));
-                        }
+                                enabled,
+                            )
+                            .clicked()
+                            {
+                                self.start_capture(info, scan_busy);
+                            }
+                            if scan_busy {
+                                ui.label(theme::rich(
+                                    "扫描进行中；等扫描结束后再捕获，避免争用 HID 接口。",
+                                    10.5,
+                                    p.tertiary,
+                                    false,
+                                ));
+                            }
+                        });
                         if let Some(result) = &self.capture_result {
                             match result {
                                 Ok(summary) => {
@@ -744,29 +795,44 @@ impl ProtocolWizard {
                             p.tertiary,
                             false,
                         ));
-                        ui.label(
-                            egui::RichText::new(hex_dump(report, 32))
+                        // 报文在分组内换行；窄窗把每行 8 列收成 6 列，避免横向溢出。
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(hex_dump(
+                                    report,
+                                    32,
+                                    hex_columns(ui.available_width()),
+                                ))
                                 .monospace()
                                 .size(10.5)
                                 .color(p.secondary),
+                            )
+                            .wrap(),
                         );
                     }
                 });
-                ui.add_space(10.0);
+                ui.add_space(8.0);
 
                 widgets::section_title(ui, p, "3. 样本与两点校准");
                 widgets::group(ui, p, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(theme::rich("厂商软件显示电量", 11.5, p.text, false));
-                        ui.add(
-                            DragValue::new(&mut self.sample_shown)
-                                .range(0..=100)
-                                .suffix("%"),
-                        );
-                        if widgets::pill_button(ui, p, "用最新报文加入样本", false).clicked() {
+                    if sample_row_stacks(ui.available_width()) {
+                        // 320px：电量输入一行，按钮另起一行并占满宽度。
+                        ui.horizontal(|ui| {
+                            ui.label(theme::rich("厂商软件显示电量", 11.5, p.text, false));
+                            ui.add(percent_value(&mut self.sample_shown));
+                        });
+                        if full_width_button(ui, p, "用最新报文加入样本", true).clicked() {
                             self.add_sample();
                         }
-                    });
+                    } else {
+                        ui.horizontal(|ui| {
+                            ui.label(theme::rich("厂商软件显示电量", 11.5, p.text, false));
+                            ui.add(percent_value(&mut self.sample_shown));
+                            if widgets::pill_button(ui, p, "用最新报文加入样本", false).clicked() {
+                                self.add_sample();
+                            }
+                        });
+                    }
                     if self.samples.is_empty() {
                         ui.label(theme::rich(
                             "至少需要两个样本，且电量字节不同。每次改变设备电量后重新捕获。",
@@ -777,7 +843,7 @@ impl ProtocolWizard {
                     } else {
                         let mut remove_sample = None;
                         for (index, sample) in self.samples.iter().enumerate() {
-                            ui.horizontal(|ui| {
+                            ui.horizontal_wrapped(|ui| {
                                 let raw = sample
                                     .raw(self.offset)
                                     .map(|value| format!("raw {value}"))
@@ -804,7 +870,7 @@ impl ProtocolWizard {
                         }
                     }
                 });
-                ui.add_space(10.0);
+                ui.add_space(8.0);
 
                 widgets::section_title(ui, p, "4. 字段与匹配");
                 widgets::group(ui, p, |ui| {
@@ -812,17 +878,22 @@ impl ProtocolWizard {
                         .as_ref()
                         .map(|info| usize::from(info.input_len).saturating_sub(1))
                         .unwrap_or(0);
+                    // 固定三行、每行 28px 命中高：电量字节、匹配头、匹配字节各占一行，
+                    // 不再把匹配头 offset 和 hex 输入挤在一起。
                     ui.horizontal(|ui| {
                         ui.label(theme::rich("电量字节 offset", 11.5, p.text, false));
-                        ui.add(DragValue::new(&mut self.offset).range(0..=max_offset));
+                        ui.add(offset_value(&mut self.offset, max_offset));
                     });
                     ui.horizontal(|ui| {
                         ui.label(theme::rich("匹配头 offset", 11.5, p.text, false));
-                        ui.add(DragValue::new(&mut self.match_offset).range(0..=max_offset));
+                        ui.add(offset_value(&mut self.match_offset, max_offset));
+                    });
+                    ui.horizontal(|ui| {
                         ui.label(theme::rich("匹配字节 hex", 11.5, p.text, false));
                         ui.add(
                             TextEdit::singleline(&mut self.match_hex)
-                                .desired_width(100.0)
+                                .desired_width(hex_edit_width(ui.available_width()))
+                                .min_size(egui::vec2(VALUE_MIN_WIDTH, HIT_HEIGHT))
                                 .hint_text("例如 72"),
                         );
                     });
@@ -833,7 +904,7 @@ impl ProtocolWizard {
                         false,
                     ));
                 });
-                ui.add_space(10.0);
+                ui.add_space(8.0);
 
                 widgets::section_title(ui, p, "5. 预览与保存");
                 widgets::group(ui, p, |ui| {
@@ -888,14 +959,24 @@ impl ProtocolWizard {
                                             false,
                                         ));
                                         if let Some(report) = &preview.report {
-                                            ui.label(
-                                                egui::RichText::new(hex_dump(report, 24))
+                                            ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(hex_dump(
+                                                        report,
+                                                        24,
+                                                        hex_columns(ui.available_width()),
+                                                    ))
                                                     .monospace()
                                                     .size(10.5)
                                                     .color(p.secondary),
+                                                )
+                                                .wrap(),
                                             );
                                         }
-                                        ui.horizontal(|ui| {
+                                        // 捕获仍在进行时保存保持禁用，条件与宽窗完全一致。
+                                        let can_save = !self.capture_active;
+                                        if save_row_stacks(ui.available_width()) {
+                                            // 320px：名称、输入框、按钮各占一行，按钮不会被裁切。
                                             ui.label(theme::rich(
                                                 "配置名称",
                                                 11.5,
@@ -904,28 +985,55 @@ impl ProtocolWizard {
                                             ));
                                             ui.add(
                                                 TextEdit::singleline(&mut self.name)
-                                                    .desired_width(180.0),
+                                                    .desired_width(ui.available_width())
+                                                    .min_size(egui::vec2(
+                                                        VALUE_MIN_WIDTH,
+                                                        HIT_HEIGHT,
+                                                    )),
                                             );
-                                            let can_save = !self.capture_active;
-                                            if widgets::pill_button_enabled(
+                                            if full_width_button(
                                                 ui,
                                                 p,
                                                 "保存为未验证配置",
-                                                false,
                                                 can_save,
                                             )
                                             .clicked()
                                             {
-                                                match self.build_profile(info, calibration) {
-                                                    Ok(profile) => {
-                                                        action = WizardAction::Save(profile);
-                                                    }
-                                                    Err(err) => {
-                                                        self.error = Some(err);
-                                                    }
-                                                }
+                                                self.submit_save(info, calibration, &mut action);
                                             }
-                                        });
+                                        } else {
+                                            ui.horizontal(|ui| {
+                                                ui.label(theme::rich(
+                                                    "配置名称",
+                                                    11.5,
+                                                    p.text,
+                                                    false,
+                                                ));
+                                                ui.add(
+                                                    TextEdit::singleline(&mut self.name)
+                                                        .desired_width(180.0)
+                                                        .min_size(egui::vec2(
+                                                            VALUE_MIN_WIDTH,
+                                                            HIT_HEIGHT,
+                                                        )),
+                                                );
+                                                if widgets::pill_button_enabled(
+                                                    ui,
+                                                    p,
+                                                    "保存为未验证配置",
+                                                    false,
+                                                    can_save,
+                                                )
+                                                .clicked()
+                                                {
+                                                    self.submit_save(
+                                                        info,
+                                                        calibration,
+                                                        &mut action,
+                                                    );
+                                                }
+                                            });
+                                        }
                                     }
                                 }
                                 Err(err) => {
@@ -935,7 +1043,7 @@ impl ProtocolWizard {
                         }
                     }
                 });
-                ui.add_space(10.0);
+                ui.add_space(8.0);
 
                 widgets::section_title(ui, p, "已保存的用户配置");
                 widgets::group(ui, p, |ui| {
@@ -943,45 +1051,43 @@ impl ProtocolWizard {
                         ui.label(theme::rich("暂无用户配置。", 11.0, p.secondary, false));
                     }
                     for profile in profiles {
-                        ui.horizontal(|ui| {
+                        let text = format!(
+                            "{} · {:04X}:{:04X} · {}",
+                            profile.spec.name,
+                            profile.binding.vendor_id,
+                            profile.binding.product_id,
+                            if profile.enabled { "已启用" } else { "已禁用" }
+                        );
+                        let width = ui.available_width();
+                        if profile_row_stacks(width) {
+                            // 320px：名称一行（按实测字体截断），启用/禁用与删除另起一行。
                             ui.label(theme::rich(
-                                format!(
-                                    "{} · {:04X}:{:04X} · {}",
-                                    profile.spec.name,
-                                    profile.binding.vendor_id,
-                                    profile.binding.product_id,
-                                    if profile.enabled { "已启用" } else { "已禁用" }
-                                ),
+                                widgets::fit_text(ui, &text, 10.5, false, width),
                                 10.5,
                                 p.text,
                                 false,
                             ));
-                            if widgets::pill_button(
-                                ui,
-                                p,
-                                if profile.enabled { "禁用" } else { "启用" },
-                                false,
-                            )
-                            .clicked()
-                            {
-                                action = WizardAction::Toggle {
-                                    id: profile.spec.id.clone(),
-                                    enabled: !profile.enabled,
-                                };
-                            }
-                            if widgets::pill_button(ui, p, "删除", false).clicked() {
-                                self.pending_delete = Some(profile.spec.id.clone());
-                            }
-                        });
+                            ui.horizontal_wrapped(|ui| {
+                                self.profile_buttons(ui, p, profile, &mut action);
+                            });
+                        } else {
+                            ui.horizontal(|ui| {
+                                ui.label(theme::rich(text, 10.5, p.text, false));
+                                self.profile_buttons(ui, p, profile, &mut action);
+                            });
+                        }
                     }
                     if let Some(id) = self.pending_delete.clone() {
-                        ui.horizontal(|ui| {
-                            ui.label(theme::rich(
-                                format!("确认删除 {id}？",),
-                                10.5,
-                                p.red,
-                                false,
-                            ));
+                        ui.horizontal_wrapped(|ui| {
+                            ui.add(
+                                egui::Label::new(theme::rich(
+                                    format!("确认删除 {id}？",),
+                                    10.5,
+                                    p.red,
+                                    false,
+                                ))
+                                .wrap(),
+                            );
                             if widgets::pill_button(ui, p, "确认删除", false).clicked() {
                                 self.pending_delete = None;
                                 action = WizardAction::Delete(id);
@@ -996,25 +1102,106 @@ impl ProtocolWizard {
                     ui.add_space(8.0);
                     widgets::section_title(ui, p, "配置诊断");
                     for line in diagnostics.iter().rev().take(6) {
-                        ui.label(
-                            egui::RichText::new(line)
-                                .size(10.5)
-                                .color(p.tertiary)
-                                .monospace(),
+                        // 长行在滚动区里换行，不横向溢出。
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(line)
+                                    .size(10.5)
+                                    .color(p.tertiary)
+                                    .monospace(),
+                            )
+                            .wrap(),
                         );
                     }
                 }
-                ui.add_space(18.0);
+                ui.add_space(8.0);
             });
         action
     }
 }
 
-fn hex_dump(bytes: &[u8], max: usize) -> String {
+/// 窄窗断点：320×480 的窗口扣掉边距、分组边框、内边距和滚动条之后，分组内容
+/// 宽度只有 264–280px，低于这个宽度的横向行必须改成分行。
+const NARROW_WIDTH: f32 = 340.0;
+/// 按钮与输入控件的命中高度，和 widgets::pill_button 一致。
+const HIT_HEIGHT: f32 = 28.0;
+/// 窄窗下拖拽数值 / 输入框的最小宽度。
+const VALUE_MIN_WIDTH: f32 = 80.0;
+
+fn is_narrow(width: f32) -> bool {
+    width < NARROW_WIDTH
+}
+
+/// 样本行：窄窗时“厂商软件显示电量 + 数值”一行，“加入样本”按钮另起一行。
+fn sample_row_stacks(width: f32) -> bool {
+    is_narrow(width)
+}
+
+/// 保存行：窄窗时名称、输入框、按钮各占一行。
+fn save_row_stacks(width: f32) -> bool {
+    is_narrow(width)
+}
+
+/// 已保存配置行：窄窗时名称一行、按钮一行。
+fn profile_row_stacks(width: f32) -> bool {
+    is_narrow(width)
+}
+
+/// 匹配字节输入框的 desired_width：用掉标签之后的剩余宽度，且不低于 80。
+fn hex_edit_width(remaining: f32) -> f32 {
+    remaining.max(VALUE_MIN_WIDTH)
+}
+
+/// 报文每行的 offset:byte 个数。像素等宽字在 10.5pt 下 8 列会撑破 320px 的分组。
+fn hex_columns(width: f32) -> usize {
+    if is_narrow(width) { 6 } else { 8 }
+}
+
+/// 28px 命中高的拖拽数值，宽度约 80。
+fn offset_value(value: &mut usize, max: usize) -> DragValue<'_> {
+    DragValue::new(value)
+        .range(0..=max)
+        .min_size(egui::vec2(VALUE_MIN_WIDTH, HIT_HEIGHT))
+}
+
+/// 0–100% 的拖拽数值，命中高度 28。
+fn percent_value(value: &mut u8) -> DragValue<'_> {
+    DragValue::new(value)
+        .range(0..=100)
+        .suffix("%")
+        .min_size(egui::vec2(VALUE_MIN_WIDTH, HIT_HEIGHT))
+}
+
+/// 会换行的说明文字；ui.label 在横向行里默认溢出，这里显式改成折行。
+fn wrapped_label(ui: &mut Ui, text: egui::RichText) -> egui::Response {
+    ui.add(egui::Label::new(text).wrap())
+}
+
+/// 全宽按钮：像素样式与 widgets::pill_button 相同（零圆角、2px 硬边框、28px 高），
+/// 但拉伸到分组内容宽度，窄窗里“保存为未验证配置”这类长文案不会被裁切。
+fn full_width_button(ui: &mut Ui, p: &Palette, text: &str, enabled: bool) -> egui::Response {
+    let width = ui.available_width();
+    let color = if enabled { p.text } else { p.tertiary };
+    let button = egui::Button::new(theme::rich(text, 12.0, color, false))
+        .fill(p.control)
+        .stroke(egui::Stroke::new(2.0, p.card_border))
+        .corner_radius(egui::CornerRadius::ZERO)
+        .min_size(egui::vec2(width, HIT_HEIGHT));
+    let response = ui.add_enabled(enabled, button);
+    if enabled {
+        response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        response
+    }
+}
+
+/// 每行 per_row 个 offset:byte；窄窗用 hex_columns 收窄列数。
+fn hex_dump(bytes: &[u8], max: usize, per_row: usize) -> String {
+    let per_row = per_row.max(1);
     let mut out = String::new();
     for (index, byte) in bytes.iter().take(max).enumerate() {
         if index > 0 {
-            out.push(if index % 8 == 0 { '\n' } else { ' ' });
+            out.push(if index % per_row == 0 { '\n' } else { ' ' });
         }
         out.push_str(&format!("{index:02X}:{byte:02X}"));
     }
@@ -1119,6 +1306,145 @@ mod tests {
         wizard.on_interfaces_changed(&new, &[new[0].clone()]);
         assert_eq!(wizard.selected, None);
         assert!(wizard.samples.is_empty());
+    }
+
+    // ---- 窄窗布局 ----
+
+    /// 320px 窗口里分组内容的实际宽度：扣掉左右边距、竖向滚动条和分组边框+内边距。
+    fn narrow_group_width() -> f32 {
+        let margin_x = theme::layout_metrics(320.0).margin_x;
+        let content = 320.0 - 2.0 * margin_x - 8.0;
+        widgets::group_inner_width(content, widgets::GROUP_PADDING)
+    }
+
+    /// 字体只能在 `Context::run()` 之后测量，所以先安静地跑一帧。
+    fn measured_context() -> egui::Context {
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        let mut output = ctx.run_ui(egui::RawInput::default(), |_ui| {});
+        output.textures_delta.clear();
+        ctx
+    }
+
+    fn text_width(ctx: &egui::Context, text: &str, size: f32) -> f32 {
+        ctx.fonts_mut(|fonts| {
+            fonts
+                .layout_no_wrap(
+                    text.to_owned(),
+                    egui::FontId::new(size, egui::FontFamily::Proportional),
+                    egui::Color32::WHITE,
+                )
+                .size()
+                .x
+        })
+    }
+
+    #[test]
+    fn narrow_layout_only_stacks_below_the_breakpoint() {
+        assert_eq!(NARROW_WIDTH, 340.0);
+        for width in [264.0, 272.0, 280.0, 320.0] {
+            assert!(sample_row_stacks(width), "样本行 {width}");
+            assert!(save_row_stacks(width), "保存行 {width}");
+            assert!(profile_row_stacks(width), "配置行 {width}");
+        }
+        for width in [NARROW_WIDTH, 360.0, 480.0] {
+            assert!(!sample_row_stacks(width));
+            assert!(!save_row_stacks(width));
+            assert!(!profile_row_stacks(width));
+        }
+    }
+
+    #[test]
+    fn narrow_group_is_where_the_wizard_renders_at_320() {
+        let width = narrow_group_width();
+        assert!((264.0..=280.0).contains(&width), "分组内宽 {width}");
+        assert!(width < NARROW_WIDTH, "{width}");
+    }
+
+    /// 字段三行规则：标签加控件塞得进窄窗分组，hex 输入框至少 80px。
+    #[test]
+    fn field_rows_fit_the_narrow_group() {
+        let ctx = measured_context();
+        let inner = narrow_group_width();
+        let label = text_width(&ctx, "匹配字节 hex", 11.5);
+        let remaining = inner - label - 6.0; // 6px item_spacing
+        assert!(remaining >= 80.0, "hex 只剩 {remaining}px");
+        assert_eq!(hex_edit_width(remaining), remaining);
+        assert_eq!(hex_edit_width(0.0), VALUE_MIN_WIDTH);
+        assert_eq!(hex_columns(inner), 6);
+        assert_eq!(hex_columns(480.0), 8);
+
+        // 6 列时报文最宽的一行也放得下。
+        let line = "00:0A 01:0B 02:0C 03:0D 04:0E 05:0F";
+        let mono = ctx.fonts_mut(|fonts| {
+            fonts
+                .layout_no_wrap(
+                    line.to_owned(),
+                    egui::FontId::new(10.5, egui::FontFamily::Monospace),
+                    egui::Color32::WHITE,
+                )
+                .size()
+                .x
+        });
+        assert!(mono <= inner, "报文行 {mono}px 超出 {inner}px");
+        assert_eq!(hex_dump(&[0u8, 1, 2, 3, 4, 5, 6], 7, 6).lines().count(), 2);
+    }
+
+    /// 320px 窗口下整页渲染一遍：五步全部有内容时也不能画出内容宽度之外。
+    #[test]
+    fn narrow_page_never_paints_past_the_content_width() {
+        let ctx = measured_context();
+        let info = interface();
+        let mut wizard = wizard_with_two_samples();
+        wizard.selected = Some(0);
+        let calibration = wizard
+            .calibration()
+            .expect("two samples")
+            .expect("distinct raw");
+        let profile = wizard.build_profile(&info, calibration).expect("profile");
+        wizard.pending_delete = Some(profile.spec.id.clone());
+
+        let p = theme::palette(false);
+        let width = 296.0; // 320px 窗口扣掉左右各 12px 边距
+        let diagnostics =
+            ["配置诊断：示例长行，用来确认诊断区在窄窗里换行而不是横向溢出".to_owned()];
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.set_width(width);
+            let _ = wizard.show(
+                ui,
+                &p,
+                std::slice::from_ref(&info),
+                std::slice::from_ref(&profile),
+                &diagnostics,
+                false,
+            );
+        });
+        let right = output
+            .shapes
+            .iter()
+            .map(|clipped| clipped.shape.visual_bounding_rect().right())
+            .fold(0.0_f32, f32::max);
+        output.textures_delta.clear();
+        assert!(right <= width + 1.0, "绘制到 {right}px，超出 {width}px");
+    }
+
+    /// 单行放不下的证据：这正是 340px 断点存在的原因。
+    #[test]
+    fn single_rows_do_not_fit_the_narrow_group() {
+        let ctx = measured_context();
+        let inner = narrow_group_width();
+        let sample_row = text_width(&ctx, "厂商软件显示电量", 11.5)
+            + VALUE_MIN_WIDTH
+            + text_width(&ctx, "用最新报文加入样本", 12.0)
+            + 12.0 // 两个 item_spacing
+            + 20.0; // 按钮内边距与边框
+        assert!(sample_row > inner, "样本行 {sample_row} <= {inner}");
+        let save_row = text_width(&ctx, "配置名称", 11.5)
+            + 180.0
+            + text_width(&ctx, "保存为未验证配置", 12.0)
+            + 12.0
+            + 20.0;
+        assert!(save_row > inner, "保存行 {save_row} <= {inner}");
     }
 
     #[test]

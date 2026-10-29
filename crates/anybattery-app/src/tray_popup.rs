@@ -26,9 +26,9 @@ use crate::widgets;
 /// 悬浮窗宽度（points）。宽度固定，行数只影响高度。
 pub const POPUP_WIDTH: f32 = 320.0;
 /// 没有任何设备行时的高度（points）。
-pub const BASE_HEIGHT: f32 = 150.0;
+pub const BASE_HEIGHT: f32 = 146.0;
 /// 单行设备占用的高度（points）。
-pub const ROW_HEIGHT: f32 = 34.0;
+pub const ROW_HEIGHT: f32 = 32.0;
 /// 悬浮窗最多列出的设备数；其余只报数量。
 pub const MAX_ROWS: usize = 4;
 /// 悬停多久之后才真正显示，避免掠过图标时闪一下。
@@ -43,7 +43,7 @@ const ANCHOR_GAP: f32 = 8.0;
 
 // 内部栅格（points）。高度固定为 `BASE_HEIGHT + rows * ROW_HEIGHT`，所以这些
 // 数值必须排得进去：标题 22 + 间隙 + 分隔 2 + 汇总 14 + 设备行 + 底部提示。
-const PAD: f32 = 12.0;
+const PAD: f32 = 10.0;
 const TITLE_HEIGHT: f32 = 22.0;
 const GAP: f32 = 4.0;
 const SUMMARY_HEIGHT: f32 = 14.0;
@@ -51,6 +51,15 @@ const REMAINDER_HEIGHT: f32 = 13.0;
 const BAR_WIDTH: f32 = 140.0;
 const BAR_HEIGHT: f32 = 7.0;
 const NAME_MAX_WIDTH: f32 = 190.0;
+
+// 32px 行内的竖直栅格：名称居中于 y+10，电量条从 y+20 起（高 7），徽标中心压在
+// y+25，三者在行内不碰撞，也不会压到下一行的分隔线。
+const ROW_NAME_Y: f32 = 10.0;
+const ROW_BAR_Y: f32 = 20.0;
+const ROW_BADGE_Y: f32 = 25.0;
+/// 底部两行提示：第一行基线距内边距底边 7px，第二行再往上 14px。
+const HINT_BASELINE: f32 = 7.0;
+const HINT_LINE_HEIGHT: f32 = 14.0;
 
 /// 托盘图标在屏幕上的物理像素矩形。
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -637,7 +646,7 @@ pub fn show(ui: &mut Ui, model: &TrayPopupModel) {
     }
 
     // 底部两行贴住内边距底边向上生长，中间多出来的空间留给设备行。
-    let hint_y = inner.bottom() - 7.0;
+    let hint_y = inner.bottom() - HINT_BASELINE;
     text(
         &painter,
         Pos2::new(left, hint_y),
@@ -650,7 +659,7 @@ pub fn show(ui: &mut Ui, model: &TrayPopupModel) {
     let scan_line = widgets::fit_text(&child, &model.scan_line(), 10.0, false, inner.width());
     text(
         &painter,
-        Pos2::new(left, hint_y - 14.0),
+        Pos2::new(left, hint_y - HINT_LINE_HEIGHT),
         Align2::LEFT_CENTER,
         scan_line,
         10.0,
@@ -675,7 +684,7 @@ fn draw_row(
     let name = widgets::fit_text(ui, &row.name, 12.0, true, name_width);
     text(
         painter,
-        Pos2::new(left, top + 10.0),
+        Pos2::new(left, top + ROW_NAME_Y),
         Align2::LEFT_CENTER,
         name,
         12.0,
@@ -683,13 +692,16 @@ fn draw_row(
         true,
     );
 
-    let bar = Rect::from_min_size(Pos2::new(left, top + 20.0), vec2(BAR_WIDTH, BAR_HEIGHT));
+    let bar = Rect::from_min_size(
+        Pos2::new(left, top + ROW_BAR_Y),
+        vec2(BAR_WIDTH, BAR_HEIGHT),
+    );
     match (row.percent, row.coarse) {
         (Some(level), _) => {
             let color = theme::battery_color_for_level(*p, level);
             text(
                 painter,
-                Pos2::new(right, top + 10.0),
+                Pos2::new(right, top + ROW_NAME_Y),
                 Align2::RIGHT_CENTER,
                 format!("{level}%"),
                 13.0,
@@ -701,7 +713,7 @@ fn draw_row(
         (None, Some(level)) => {
             text(
                 painter,
-                Pos2::new(right, top + 10.0),
+                Pos2::new(right, top + ROW_NAME_Y),
                 Align2::RIGHT_CENTER,
                 level.label_zh(),
                 13.0,
@@ -745,7 +757,7 @@ fn draw_row(
     let gaps = separator + 8.0;
     let total: f32 = widths.iter().sum::<f32>() + gaps * badges.len().saturating_sub(1) as f32;
 
-    let badge_y = top + 28.0;
+    let badge_y = top + ROW_BADGE_Y;
     let mut x = right - total;
     for (index, ((label, color), width)) in badges.iter().zip(widths.iter()).enumerate() {
         text(
@@ -999,7 +1011,8 @@ mod tests {
         let size = vec2(POPUP_WIDTH, BASE_HEIGHT);
         let anchor = anchor(940.0, 1010.0);
         let pos = place_popup(anchor, size, MONITOR, 1.0);
-        assert_eq!(pos, Pos2::new(788.0, 852.0));
+        // 紧凑高度 146：1010 - 8 - 146。
+        assert_eq!(pos, Pos2::new(788.0, 856.0));
         assert_clear_of_anchor(anchor, pos, size);
         assert!(pos.y + size.y <= 1010.0 - ANCHOR_GAP + 1e-3);
     }
@@ -1025,13 +1038,14 @@ mod tests {
         // 右边缘：上方/下方都会溢出，右侧没有空间，所以只能放到图标左边。
         let right_anchor = anchor(1900.0, 500.0);
         let right_pos = place_popup(right_anchor, size, MONITOR, 1.0);
-        assert_eq!(right_pos, Pos2::new(1572.0, 433.0));
+        // 居中偏移用紧凑高度 146：508 - 73。
+        assert_eq!(right_pos, Pos2::new(1572.0, 435.0));
         assert_clear_of_anchor(right_anchor, right_pos, size);
 
         // 左边缘：上方溢出，只能放到图标右边。
         let left_anchor = anchor(10.0, 500.0);
         let left_pos = place_popup(left_anchor, size, MONITOR, 1.0);
-        assert_eq!(left_pos, Pos2::new(34.0, 433.0));
+        assert_eq!(left_pos, Pos2::new(34.0, 435.0));
         assert_clear_of_anchor(left_anchor, left_pos, size);
     }
 
@@ -1049,7 +1063,8 @@ mod tests {
         let anchor = anchor(-1700.0, 500.0);
         let pos = place_popup(anchor, size, monitor, 1.0);
 
-        assert_eq!(pos, Pos2::new(-1920.0, 342.0));
+        // 压住图标后改用上方候选：500 - 8 - 146。
+        assert_eq!(pos, Pos2::new(-1920.0, 346.0));
         // 负原点必须原样保留，不能被 clamp 到 0。
         assert!(pos.x < 0.0);
         assert!(pos.x >= -1920.0);
@@ -1086,11 +1101,11 @@ mod tests {
         let corner = anchor(1880.0, 2020.0);
         let pos = place_popup(corner, size, monitor, 2.0);
         assert!((pos.x - 784.0).abs() < 0.01, "{pos:?}");
-        assert!((pos.y - 852.0).abs() < 0.01, "{pos:?}");
+        assert!((pos.y - 856.0).abs() < 0.01, "{pos:?}");
 
         // 非法的 ppp 退化成 1.0，而不是产生 NaN。
         let fallback = place_popup(anchor(940.0, 1010.0), size, MONITOR, 0.0);
-        assert_eq!(fallback, Pos2::new(788.0, 852.0));
+        assert_eq!(fallback, Pos2::new(788.0, 856.0));
         let nan = place_popup(anchor(940.0, 1010.0), size, MONITOR, f32::NAN);
         assert!(nan.x.is_finite() && nan.y.is_finite());
     }
@@ -1305,9 +1320,14 @@ mod tests {
     fn layout_budget_fits_every_row_count() {
         // 窗口高度由 height() 决定，内部栅格必须在这个高度里排得下，
         // 否则底部提示会压到最后一台设备上。
+        // 紧凑栅格：BASE 146、ROW 32、PAD 10，标题 22 / 汇总 14 / 分隔 2 保持不变。
+        assert_eq!(BASE_HEIGHT, 146.0);
+        assert_eq!(ROW_HEIGHT, 32.0);
+        assert_eq!(PAD, 10.0);
         let inner_height = |rows: usize| BASE_HEIGHT + rows as f32 * ROW_HEIGHT - 8.0 - 2.0 * PAD;
         let header_and_summary = TITLE_HEIGHT + GAP + 2.0 + GAP + SUMMARY_HEIGHT + GAP;
-        let bottom = 27.0;
+        // 底部两行提示：基线 7px、行距 14px，再加半行字高。
+        let bottom = HINT_BASELINE + HINT_LINE_HEIGHT + 6.0;
         for rows in 0..=MAX_ROWS {
             let body = if rows == 0 {
                 ROW_HEIGHT
@@ -1326,6 +1346,71 @@ mod tests {
                 inner_height(rows)
             );
         }
+    }
+
+    /// 字体只能在 `Context::run()` 之后测量，所以先安静地跑一帧。
+    fn measured_context() -> eframe::egui::Context {
+        let ctx = eframe::egui::Context::default();
+        theme::install_fonts(&ctx);
+        let mut output = ctx.run_ui(eframe::egui::RawInput::default(), |_ui| {});
+        output.textures_delta.clear();
+        ctx
+    }
+
+    #[test]
+    fn row_text_bands_fit_the_compact_row() {
+        let ctx = measured_context();
+        let height = |size: f32, bold: bool| {
+            ctx.fonts_mut(|fonts| {
+                fonts
+                    .layout_no_wrap("电量".to_owned(), text_font(size, bold), Color32::WHITE)
+                    .size()
+                    .y
+            })
+        };
+        let name = height(12.0, true);
+        let badge = height(10.0, false);
+        let name_top = ROW_NAME_Y - name / 2.0;
+        let name_bottom = ROW_NAME_Y + name / 2.0;
+        let badge_top = ROW_BADGE_Y - badge / 2.0;
+        let badge_bottom = ROW_BADGE_Y + badge / 2.0;
+        assert!(name_top >= 0.0, "名称从 {name_top} 开始，超出行顶");
+        assert!(
+            name_bottom <= badge_top,
+            "名称底 {name_bottom} 压到徽标顶 {badge_top}"
+        );
+        assert!(
+            badge_bottom <= ROW_HEIGHT,
+            "徽标底 {badge_bottom} 溢出 {ROW_HEIGHT}px 行"
+        );
+        assert!(
+            ROW_BAR_Y >= name_bottom,
+            "电量条 {ROW_BAR_Y} 压到名称底 {name_bottom}"
+        );
+        assert!(ROW_BAR_Y + BAR_HEIGHT <= ROW_HEIGHT);
+    }
+
+    #[test]
+    fn badges_never_reach_the_battery_bar() {
+        let ctx = measured_context();
+        let width = |text: &str| {
+            ctx.fonts_mut(|fonts| {
+                fonts
+                    .layout_no_wrap(text.to_owned(), text_font(10.0, false), Color32::WHITE)
+                    .size()
+                    .x
+            })
+        };
+        // draw_row 的最宽一串徽标：最低 · 充电中 · 未验证。
+        let badges = ["最低", "充电中", "未验证"];
+        let separator = width("·");
+        let total = badges.iter().map(|label| width(label)).sum::<f32>()
+            + (separator + 8.0) * (badges.len() - 1) as f32;
+        let inner = POPUP_WIDTH - 8.0 - 2.0 * PAD;
+        assert!(
+            inner - total >= BAR_WIDTH,
+            "徽标 {total}px 会压到 {BAR_WIDTH}px 电量条（内宽 {inner}）"
+        );
     }
 
     #[test]
