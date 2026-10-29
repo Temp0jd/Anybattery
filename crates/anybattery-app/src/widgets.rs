@@ -18,8 +18,42 @@ pub const CHOICE_SIZE: f32 = 28.0;
 
 /// Animations stay short: feedback, never decoration.
 const ANIMATION_SECS: f32 = 0.15;
-/// Refresh spinner step while scanning, and the repaint cadence that drives it.
-const SCAN_REPAINT_SECS: f32 = 0.2;
+/// Refresh ring cadence while scanning; eight steps make one full turn.
+const SCAN_REPAINT_SECS: f32 = 0.12;
+
+/// Height of the custom interval slider, including its endpoint labels.
+pub const SLIDER_HEIGHT: f32 = 34.0;
+/// Eight-step ring used by the refresh control.
+pub const REFRESH_RING_STEPS: usize = 8;
+
+/// Map a value in `min..=max` to a 0..1 logarithmic position.
+pub fn log_slider_t(value: f32, min: f32, max: f32) -> f32 {
+    if !(min > 0.0 && max > min) || !value.is_finite() {
+        return 0.0;
+    }
+    ((value.clamp(min, max) / min).ln() / (max / min).ln()).clamp(0.0, 1.0)
+}
+
+/// Map a 0..1 position back to a value in `min..=max`, logarithmically.
+pub fn log_slider_value(t: f32, min: f32, max: f32) -> f32 {
+    if !(min > 0.0 && max > min) {
+        return min;
+    }
+    let t = if t.is_finite() {
+        t.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    min * (max / min).powf(t)
+}
+
+/// Current step of the refresh ring. Frozen at zero when animations are off.
+pub fn refresh_spin_step(time: f64, animations: bool) -> usize {
+    if !animations || !time.is_finite() {
+        return 0;
+    }
+    ((time / f64::from(SCAN_REPAINT_SECS)) as i64).rem_euclid(REFRESH_RING_STEPS as i64) as usize
+}
 
 /// Animation time used by this crate's custom transitions.
 /// Zero when the user turned animations off, so every value jumps straight to its target.
@@ -857,34 +891,16 @@ pub fn refresh_button(ui: &mut Ui, p: &Palette, scanning: bool, animations: bool
     };
     let painter = ui.painter();
     if scanning {
-        // Four-step rotation around the frame; one step per 200 ms, so idle cost is bounded
-        // and disabling animations drops straight to the static glyph.
-        let step = if animations {
-            let t = ui.input(|i| i.time);
-            let step = ((t / SCAN_REPAINT_SECS as f64) as i64).rem_euclid(4);
+        // An eight-block pixel ring: the gap and the two bright blocks rotate clockwise.
+        // One step per 120 ms keeps the cost bounded; animations off freezes the ring.
+        let step = refresh_spin_step(ui.input(|i| i.time), animations);
+        if animations {
             ui.ctx()
                 .request_repaint_after(Duration::from_secs_f32(SCAN_REPAINT_SECS));
-            step
-        } else {
-            0
-        };
-        let c = rect.center();
-        let r = 5.0;
-        let corners = [
-            Pos2::new(c.x - r, c.y - r),
-            Pos2::new(c.x + r, c.y - r),
-            Pos2::new(c.x + r, c.y + r),
-            Pos2::new(c.x - r, c.y + r),
-        ];
-        let start = corners[step as usize];
-        let mid = corners[((step + 1) % 4) as usize];
-        painter.line_segment([start, mid], Stroke::new(2.0, color));
-        painter.line_segment(
-            [start, corners[((step + 3) % 4) as usize]],
-            Stroke::new(2.0, color.gamma_multiply(0.45)),
-        );
+        }
+        draw_refresh_ring(painter, rect, color, Some(step));
     } else {
-        draw_glyph(painter, rect, Glyph::Refresh, color);
+        draw_refresh_ring(painter, rect, color, None);
     }
     let response = response.on_hover_text(if scanning {
         "正在扫描…"
@@ -895,6 +911,36 @@ pub fn refresh_button(ui: &mut Ui, p: &Palette, scanning: bool, animations: bool
         response
     } else {
         response.on_hover_cursor(CursorIcon::PointingHand)
+    }
+}
+
+/// Eight square blocks on a circle. `spin` is `Some(step)` while scanning: the block at
+/// `step` becomes the gap, and the two blocks after it stay bright so the rotation is visible.
+fn draw_refresh_ring(painter: &egui::Painter, rect: Rect, color: Color32, spin: Option<usize>) {
+    let c = rect.center();
+    let radius = 7.0;
+    let block = 3.0;
+    let ppp = painter.ctx().pixels_per_point();
+    for index in 0..REFRESH_RING_STEPS {
+        if spin.is_some_and(|step| step % REFRESH_RING_STEPS == index) {
+            continue;
+        }
+        let angle = -std::f32::consts::FRAC_PI_2
+            + index as f32 * std::f32::consts::TAU / REFRESH_RING_STEPS as f32;
+        let center = Pos2::new(c.x + angle.cos() * radius, c.y + angle.sin() * radius);
+        let block_color = match spin {
+            None => color,
+            Some(step) => {
+                let distance = (index + REFRESH_RING_STEPS - step) % REFRESH_RING_STEPS;
+                if distance <= 2 {
+                    color
+                } else {
+                    color.gamma_multiply(0.38)
+                }
+            }
+        };
+        let cell = Rect::from_center_size(center, vec2(block, block));
+        painter.rect_filled(theme::snap_rect(ppp, cell), CornerRadius::ZERO, block_color);
     }
 }
 
@@ -1190,6 +1236,114 @@ pub fn pill_button_enabled(
     }
 }
 
+/// Pixel interval slider: a framed 12px track, accent fill, 14x22 knob and endpoint labels.
+/// Values map logarithmically, matching the old egui slider's range.
+pub fn pixel_slider(ui: &mut Ui, p: &Palette, value: &mut f32, min: f32, max: f32) -> Response {
+    let width = ui.available_width();
+    let (rect, mut response) =
+        ui.allocate_exact_size(vec2(width, SLIDER_HEIGHT), Sense::click_and_drag());
+    let rect = theme::snap_rect(ui.ctx().pixels_per_point(), rect);
+    let track = Rect::from_min_max(
+        Pos2::new(rect.left() + 8.0, rect.top() + 6.0),
+        Pos2::new(rect.right() - 8.0, rect.top() + 18.0),
+    );
+
+    if response.clicked() {
+        response.request_focus();
+    }
+    let mut changed = false;
+    if let Some(pointer) = response.interact_pointer_pos() {
+        if response.clicked() || response.dragged() {
+            let t = if track.width() > 0.0 {
+                ((pointer.x - track.left()) / track.width()).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let next = log_slider_value(t, min, max);
+            if (next - *value).abs() > f32::EPSILON {
+                *value = next;
+                changed = true;
+            }
+        }
+    }
+    if response.has_focus() {
+        let (left, right, shift) = ui.input(|input| {
+            (
+                input.key_pressed(egui::Key::ArrowLeft),
+                input.key_pressed(egui::Key::ArrowRight),
+                input.modifiers.shift,
+            )
+        });
+        if left || right {
+            let step = if shift { 60.0 } else { 15.0 };
+            let next = if left { *value - step } else { *value + step };
+            let next = next.clamp(min, max);
+            if (next - *value).abs() > f32::EPSILON {
+                *value = next;
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        response.mark_changed();
+    }
+
+    let t = log_slider_t(*value, min, max);
+    let painter = ui.painter();
+    icons::pixel_frame(painter, track, p.control, p.card_border);
+    let inner = track.shrink(2.0);
+    if t > 0.0 {
+        let fill = Rect::from_min_max(
+            inner.min,
+            Pos2::new(inner.left() + inner.width() * t, inner.bottom()),
+        );
+        painter.rect_filled(fill, CornerRadius::ZERO, p.accent);
+    }
+    // Preset notches stay visible over the fill and make the scale legible.
+    for seconds in [30.0_f32, 60.0, 300.0, 600.0] {
+        let x = track.left() + track.width() * log_slider_t(seconds, min, max);
+        painter.rect_filled(
+            theme::snap_rect(
+                ui.ctx().pixels_per_point(),
+                Rect::from_min_size(Pos2::new(x, track.top() - 3.0), vec2(1.0, 3.0)),
+            ),
+            CornerRadius::ZERO,
+            p.tertiary,
+        );
+    }
+    let knob_center = Pos2::new(track.left() + track.width() * t, track.center().y);
+    let knob = Rect::from_center_size(knob_center, vec2(14.0, 22.0));
+    let knob_border = if response.hovered() || response.dragged() {
+        p.accent
+    } else {
+        p.card_border
+    };
+    icons::pixel_frame(painter, knob, p.card_solid, knob_border);
+    painter.rect_filled(
+        theme::snap_rect(
+            ui.ctx().pixels_per_point(),
+            Rect::from_center_size(knob_center, vec2(2.0, 8.0)),
+        ),
+        CornerRadius::ZERO,
+        p.accent,
+    );
+    painter.text(
+        Pos2::new(rect.left() + 2.0, rect.bottom() - 2.0),
+        Align2::LEFT_BOTTOM,
+        "15 秒",
+        FontId::new(9.0, FontFamily::Proportional),
+        p.tertiary,
+    );
+    painter.text(
+        Pos2::new(rect.right() - 2.0, rect.bottom() - 2.0),
+        Align2::RIGHT_BOTTOM,
+        "30 分钟",
+        FontId::new(9.0, FontFamily::Proportional),
+        p.tertiary,
+    );
+    response.on_hover_text("拖动调整刷新间隔；方向键微调")
+}
+
 /// Footer: one natural-reading line for the interval and the freshness of the last scan.
 pub fn footer(
     ui: &mut Ui,
@@ -1303,6 +1457,45 @@ mod tests {
         assert_eq!(scan_age_text(None, false), "等待首次扫描");
         assert_eq!(scan_age_text(None, true), "正在扫描…");
         assert_eq!(scan_age_text(Some(Instant::now()), false), "刚刚刷新");
+    }
+}
+
+#[cfg(test)]
+mod slider_tests {
+    use super::*;
+
+    #[test]
+    fn logarithmic_slider_round_trips_the_supported_range() {
+        for value in [15.0, 30.0, 60.0, 300.0, 600.0, 1800.0] {
+            let t = log_slider_t(value, 15.0, 1800.0);
+            let back = log_slider_value(t, 15.0, 1800.0);
+            assert!((back - value).abs() < 0.01, "{value} -> {t} -> {back}");
+        }
+        assert_eq!(log_slider_t(15.0, 15.0, 1800.0), 0.0);
+        assert_eq!(log_slider_t(1800.0, 15.0, 1800.0), 1.0);
+        // A 60-second preset sits below the midpoint in log space, not above it.
+        assert!(log_slider_t(60.0, 15.0, 1800.0) < 0.5);
+    }
+
+    #[test]
+    fn slider_math_survives_invalid_values() {
+        assert_eq!(log_slider_t(-1.0, 15.0, 1800.0), 0.0);
+        assert_eq!(log_slider_t(f32::NAN, 15.0, 1800.0), 0.0);
+        assert_eq!(log_slider_value(f32::NAN, 15.0, 1800.0), 15.0);
+        assert_eq!(log_slider_value(0.0, 0.0, 10.0), 0.0);
+        assert_eq!(log_slider_value(0.0, 18.0, 18.0), 18.0);
+        assert_eq!(SLIDER_HEIGHT, 34.0);
+    }
+
+    #[test]
+    fn refresh_ring_uses_eight_wrapping_steps() {
+        assert_eq!(REFRESH_RING_STEPS, 8);
+        assert_eq!(refresh_spin_step(0.0, true), 0);
+        assert_eq!(refresh_spin_step(0.13, true), 1);
+        assert_eq!(refresh_spin_step(0.25, true), 2);
+        assert!(refresh_spin_step(1.01, true) < REFRESH_RING_STEPS);
+        assert_eq!(refresh_spin_step(99.0, false), 0);
+        assert_eq!(refresh_spin_step(f64::NAN, true), 0);
     }
 }
 

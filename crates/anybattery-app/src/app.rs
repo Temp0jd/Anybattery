@@ -1348,13 +1348,8 @@ impl AnyBatteryApp {
                             ));
                         });
                     });
-                    ui.spacing_mut().slider_width = (ui.available_width() - 6.0).max(120.0);
                     let mut poll = self.settings.poll_secs as f32;
-                    let slider = ui.add(
-                        egui::Slider::new(&mut poll, 15.0..=1800.0)
-                            .logarithmic(true)
-                            .show_value(false),
-                    );
+                    let slider = widgets::pixel_slider(ui, p, &mut poll, 15.0, 1800.0);
                     let holding = slider.is_pointer_button_down_on();
                     if slider.changed() {
                         // Value and label follow the drag immediately; the file is touched
