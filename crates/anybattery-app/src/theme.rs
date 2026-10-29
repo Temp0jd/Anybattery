@@ -13,6 +13,43 @@ pub const ORANGE: Color32 = Color32::from_rgb(217, 138, 43);
 pub const RED: Color32 = Color32::from_rgb(142, 47, 41);
 pub const YELLOW: Color32 = Color32::from_rgb(230, 190, 80);
 
+/// Default and minimum window sizes, in logical points. Kept here so the shell geometry has
+/// one source instead of scattered literals.
+pub const DEFAULT_WINDOW_SIZE: [f32; 2] = [400.0, 528.0];
+pub const MIN_WINDOW_SIZE: [f32; 2] = [320.0, 480.0];
+
+/// Per-width shell spacing shared by the window frame and the page header.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LayoutMetrics {
+    pub margin_x: f32,
+    pub content_top: f32,
+    pub content_bottom: f32,
+    pub header_height: f32,
+    pub narrow: bool,
+}
+
+/// Narrow windows get tighter margins and a shorter header so a 320px window still leaves
+/// usable room for the page content.
+pub fn layout_metrics(width: f32) -> LayoutMetrics {
+    if width < 380.0 {
+        LayoutMetrics {
+            margin_x: 12.0,
+            content_top: 6.0,
+            content_bottom: 8.0,
+            header_height: 40.0,
+            narrow: true,
+        }
+    } else {
+        LayoutMetrics {
+            margin_x: 16.0,
+            content_top: 8.0,
+            content_bottom: 10.0,
+            header_height: 44.0,
+            narrow: false,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct Palette {
     pub dark: bool,
@@ -147,7 +184,7 @@ pub fn install_fonts(ctx: &egui::Context) {
             ),
             (
                 TextStyle::Heading,
-                FontId::new(24.0, FontFamily::Name("bold".into())),
+                FontId::new(20.0, FontFamily::Name("bold".into())),
             ),
             (
                 TextStyle::Monospace,
@@ -336,6 +373,30 @@ mod tests {
                     dark
                 );
             }
+        }
+    }
+
+    #[test]
+    fn layout_metrics_switch_at_380() {
+        for (width, margin_x, content_top, content_bottom, header_height, narrow) in [
+            (319.0, 12.0, 6.0, 8.0, 40.0, true),
+            (320.0, 12.0, 6.0, 8.0, 40.0, true),
+            (360.0, 12.0, 6.0, 8.0, 40.0, true),
+            (379.0, 12.0, 6.0, 8.0, 40.0, true),
+            (380.0, 16.0, 8.0, 10.0, 44.0, false),
+            (400.0, 16.0, 8.0, 10.0, 44.0, false),
+        ] {
+            assert_eq!(
+                layout_metrics(width),
+                LayoutMetrics {
+                    margin_x,
+                    content_top,
+                    content_bottom,
+                    header_height,
+                    narrow,
+                },
+                "width {width}"
+            );
         }
     }
 

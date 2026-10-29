@@ -499,10 +499,10 @@ pub enum Glyph {
     Close,
 }
 
-pub const TITLEBAR_HEIGHT: f32 = 40.0;
+pub const TITLEBAR_HEIGHT: f32 = 36.0;
 pub const CAPTION_BUTTON_SIZE: f32 = 30.0;
-const CAPTION_BUTTON_GAP: f32 = 4.0;
-const CAPTION_RIGHT_MARGIN: f32 = 8.0;
+const CAPTION_BUTTON_GAP: f32 = 2.0;
+const CAPTION_RIGHT_MARGIN: f32 = 6.0;
 
 #[derive(Clone, Copy)]
 pub struct CaptionButtonLayout {
@@ -529,6 +529,18 @@ pub fn caption_button_layout(bar: Rect) -> CaptionButtonLayout {
         maximize: Rect::from_min_size(Pos2::new(maximize_left, top), size),
         close: Rect::from_min_size(Pos2::new(close_left, top), size),
     }
+}
+
+/// Draggable area of the title bar. It stops short of the caption cluster so pressing a
+/// caption button can never start a window move on the same frame.
+pub fn titlebar_drag_rect(bar: Rect) -> Rect {
+    Rect::from_min_max(
+        Pos2::new(bar.left() + 4.0, bar.top() + 4.0),
+        Pos2::new(
+            caption_button_layout(bar).right_edge() - 6.0,
+            bar.bottom() - 2.0,
+        ),
+    )
 }
 
 /// A caption button at an explicit rectangle. Kept separate from [`icon_button`] because the
@@ -1023,8 +1035,13 @@ mod titlebar_tests {
 
     #[test]
     fn caption_buttons_fit_the_minimum_width_without_overlap() {
-        for width in [380.0, 430.0] {
-            let bar = Rect::from_min_size(Pos2::new(0.0, 2.0), vec2(width - 4.0, 38.0));
+        // The real bar is inset 2px on each side (width - 4) and starts 2px below
+        // the window top, so it is TITLEBAR_HEIGHT - 2 tall.
+        for width in [320.0, 360.0, 400.0, 430.0] {
+            let bar = Rect::from_min_size(
+                Pos2::new(0.0, 2.0),
+                vec2(width - 4.0, TITLEBAR_HEIGHT - 4.0),
+            );
             let layout = caption_button_layout(bar);
             for button in [layout.minimize, layout.maximize, layout.close] {
                 assert_eq!(button.width(), CAPTION_BUTTON_SIZE);
@@ -1033,11 +1050,31 @@ mod titlebar_tests {
                     bar.contains_rect(button),
                     "button outside title bar at {width}"
                 );
+                assert_eq!(button.center().y, bar.center().y, "not centred at {width}");
             }
+            assert_eq!(
+                layout.maximize.left() - layout.minimize.right(),
+                CAPTION_BUTTON_GAP
+            );
+            assert_eq!(
+                layout.close.left() - layout.maximize.right(),
+                CAPTION_BUTTON_GAP
+            );
             assert!(layout.minimize.right() < layout.maximize.left());
             assert!(layout.maximize.right() < layout.close.left());
-            assert_eq!(layout.close.right(), bar.right() - 8.0);
-            assert!(layout.right_edge() - 6.0 > 0.0);
+            assert_eq!(layout.close.right(), bar.right() - 6.0);
+
+            // The drag target covers the rest of the bar and excludes every caption button.
+            let drag = titlebar_drag_rect(bar);
+            assert!(bar.contains_rect(drag), "drag area outside bar at {width}");
+            assert!(drag.width() > 0.0, "empty drag area at {width}");
+            assert!(drag.right() < layout.minimize.left());
+            for button in [layout.minimize, layout.maximize, layout.close] {
+                assert!(
+                    !drag.intersects(button),
+                    "drag area overlaps a caption button at {width}"
+                );
+            }
         }
     }
 }

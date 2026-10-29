@@ -793,7 +793,7 @@ impl AnyBatteryApp {
             p.card_border,
         );
 
-        let icon_size = 20.0;
+        let icon_size = 18.0;
         let icon = Rect::from_center_size(
             Pos2::new(bar.left() + 8.0 + icon_size / 2.0, bar.center().y),
             vec2(icon_size, icon_size),
@@ -803,7 +803,7 @@ impl AnyBatteryApp {
             Pos2::new(icon.right() + 7.0, bar.center().y),
             Align2::LEFT_CENTER,
             "AnyBattery",
-            FontId::new(13.0, egui::FontFamily::Name("bold".into())),
+            FontId::new(12.0, egui::FontFamily::Name("bold".into())),
             p.text,
         );
 
@@ -854,10 +854,7 @@ impl AnyBatteryApp {
 
         // Leave the button cluster out of the drag target so a press on a caption button can
         // never start a window move on the same frame.
-        let drag_rect = Rect::from_min_max(
-            Pos2::new(bar.left() + 4.0, bar.top() + 4.0),
-            Pos2::new(layout.right_edge() - 6.0, bar.bottom() - 2.0),
-        );
+        let drag_rect = widgets::titlebar_drag_rect(bar);
         let drag = ui.interact(
             drag_rect,
             Id::new("anybattery.titlebar.drag"),
@@ -965,7 +962,7 @@ impl AnyBatteryApp {
         let rect = ui.max_rect();
         let painter = ui.painter();
         painter.rect_filled(rect, CornerRadius::ZERO, p.bg);
-        let strip = Rect::from_min_size(rect.min, vec2(rect.width(), 112.0));
+        let strip = Rect::from_min_size(rect.min, vec2(rect.width(), 96.0));
         painter.rect_filled(strip, CornerRadius::ZERO, p.bg_glow);
         // Dithered seam, like a printed cartridge label.
         let mut x = rect.left() + 4.0;
@@ -984,13 +981,13 @@ impl AnyBatteryApp {
             StrokeKind::Inside,
         );
     }
-    fn header(&mut self, ui: &mut Ui, p: &Palette) {
+    fn header(&mut self, ui: &mut Ui, p: &Palette, metrics: theme::LayoutMetrics) {
         let width = ui.available_width();
-        let (bar, _) = ui.allocate_exact_size(vec2(width, 50.0), Sense::hover());
+        let (bar, _) = ui.allocate_exact_size(vec2(width, metrics.header_height), Sense::hover());
         let mut right = ui.new_child(
             UiBuilder::new()
                 .max_rect(Rect::from_min_size(
-                    Pos2::new(bar.right() - 70.0, bar.top() + 11.0),
+                    Pos2::new(bar.right() - 70.0, bar.center().y - 14.0),
                     vec2(70.0, 28.0),
                 ))
                 .layout(Layout::right_to_left(Align::Center)),
@@ -1010,8 +1007,10 @@ impl AnyBatteryApp {
 
         let mut title_left = bar.left();
         if self.page != Page::Devices {
-            let back_rect =
-                Rect::from_min_size(Pos2::new(bar.left(), bar.top() + 11.0), vec2(30.0, 28.0));
+            let back_rect = Rect::from_min_size(
+                Pos2::new(bar.left(), bar.center().y - 14.0),
+                vec2(30.0, 28.0),
+            );
             let mut back = ui.new_child(
                 UiBuilder::new()
                     .max_rect(back_rect)
@@ -1025,12 +1024,19 @@ impl AnyBatteryApp {
                     Page::Devices
                 };
             }
-            title_left += 36.0;
+            title_left += 34.0;
         }
         let (title, subtitle) = match self.page {
-            Page::Devices => (
-                "电池".to_owned(),
-                if self.devices.is_empty() {
+            Page::Devices => {
+                let subtitle = if metrics.narrow {
+                    if self.scanning {
+                        "正在扫描设备…".to_owned()
+                    } else if self.devices.is_empty() {
+                        "蓝牙与 2.4G 接收器".to_owned()
+                    } else {
+                        format!("{} 台设备", self.devices.len())
+                    }
+                } else if self.devices.is_empty() {
                     if self.scanning {
                         "正在扫描设备…".to_owned()
                     } else {
@@ -1044,8 +1050,9 @@ impl AnyBatteryApp {
                         self.counts.1,
                         self.counts.2
                     )
-                },
-            ),
+                };
+                ("电池".to_owned(), subtitle)
+            }
             Page::Settings => ("设置".to_owned(), "刷新、通知与外观".to_owned()),
             Page::Diagnostics => ("诊断".to_owned(), "扫描结果与设备接口".to_owned()),
             Page::ProtocolWizard => (
@@ -1054,16 +1061,21 @@ impl AnyBatteryApp {
             ),
         };
         let title_width = (bar.right() - 78.0 - title_left).max(40.0);
+        let (title_y, subtitle_y) = if metrics.narrow {
+            (bar.top() + 12.0, bar.top() + 31.0)
+        } else {
+            (bar.top() + 14.0, bar.top() + 34.0)
+        };
         let painter = ui.painter();
         painter.text(
-            Pos2::new(title_left, bar.top() + 15.0),
+            Pos2::new(title_left, title_y),
             Align2::LEFT_CENTER,
-            widgets::fit_text(ui, &title, 28.0, true, title_width),
-            FontId::new(28.0, egui::FontFamily::Name("bold".into())),
+            widgets::fit_text(ui, &title, 20.0, true, title_width),
+            FontId::new(20.0, egui::FontFamily::Name("bold".into())),
             p.text,
         );
         painter.text(
-            Pos2::new(title_left, bar.top() + 42.0),
+            Pos2::new(title_left, subtitle_y),
             Align2::LEFT_CENTER,
             widgets::fit_text(ui, &subtitle, 11.0, false, title_width),
             FontId::new(11.0, egui::FontFamily::Proportional),
@@ -1650,12 +1662,16 @@ impl eframe::App for AnyBatteryApp {
         self.paint_background(ui, &p);
         self.titlebar(ui, &p, maximized);
         let rect = ui.max_rect();
+        let metrics = theme::layout_metrics(rect.width());
         let content = Rect::from_min_max(
             Pos2::new(
-                rect.left() + 16.0,
-                rect.top() + widgets::TITLEBAR_HEIGHT + 12.0,
+                rect.left() + metrics.margin_x,
+                rect.top() + widgets::TITLEBAR_HEIGHT + metrics.content_top,
             ),
-            Pos2::new(rect.right() - 16.0, rect.bottom() - 12.0),
+            Pos2::new(
+                rect.right() - metrics.margin_x,
+                rect.bottom() - metrics.content_bottom,
+            ),
         );
         let mut child = ui.new_child(
             UiBuilder::new()
@@ -1663,7 +1679,7 @@ impl eframe::App for AnyBatteryApp {
                 .layout(Layout::top_down(Align::LEFT)),
         );
         child.set_width(content.width());
-        self.header(&mut child, &p);
+        self.header(&mut child, &p, metrics);
         match self.page {
             Page::Devices => self.devices_page(&mut child, &p),
             Page::Settings => self.settings_page(&mut child, &p),

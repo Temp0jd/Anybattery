@@ -78,8 +78,8 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([430.0, 680.0])
-            .with_min_inner_size([380.0, 520.0])
+            .with_inner_size(theme::DEFAULT_WINDOW_SIZE)
+            .with_min_inner_size(theme::MIN_WINDOW_SIZE)
             .with_decorations(false)
             .with_resizable(true)
             .with_title("AnyBattery")
