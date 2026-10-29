@@ -73,20 +73,33 @@ impl DeviceKind {
             "orochi",
         ]) {
             Self::Mouse
-        } else if has(&["keyboard", "键盘", "blackwidow", "huntsman", "keychron"]) {
+        } else if has(&[
+            "keyboard",
+            "键盘",
+            "blackwidow",
+            "huntsman",
+            "keychron",
+            "wooting",
+            "nuphy",
+        ]) {
             Self::Keyboard
         } else if has(&[
+            "earbud", "buds", "airpods", "耳塞", "wf-1000", "linkbuds", "freebuds",
+        ]) {
+            // Check earbuds before headset: "AirPods" and "... Buds" would
+            // otherwise match the broader headset keywords first.
+            Self::Earbuds
+        } else if has(&[
             "headset",
-            "耳机",
             "headphone",
+            "耳机",
             "barracuda",
             "blackshark",
             "wh-1000",
-            "airpods",
+            "arctis",
+            "cloud iii",
         ]) {
             Self::Headset
-        } else if has(&["earbud", "buds", "耳塞", "airpods"]) {
-            Self::Earbuds
         } else if has(&["speaker", "音箱", "soundbar"]) {
             Self::Speaker
         } else if has(&[
@@ -98,6 +111,9 @@ impl DeviceKind {
             "dualshock",
             "joy-con",
             "steam controller",
+            "8bitdo",
+            "flydigi",
+            "vader",
         ]) {
             Self::Controller
         } else if has(&["pen", "stylus", "触控笔"]) {
@@ -409,6 +425,26 @@ mod tests {
         assert_eq!(
             DeviceKind::infer_from_name("Sony WH-1000XM5"),
             DeviceKind::Headset
+        );
+        assert_eq!(
+            DeviceKind::infer_from_name("AirPods Pro"),
+            DeviceKind::Earbuds
+        );
+        assert_eq!(
+            DeviceKind::infer_from_name("Galaxy Buds2 Pro"),
+            DeviceKind::Earbuds
+        );
+        assert_eq!(
+            DeviceKind::infer_from_name("Keychron Q1"),
+            DeviceKind::Keyboard
+        );
+        assert_eq!(
+            DeviceKind::infer_from_name("8BitDo Ultimate"),
+            DeviceKind::Controller
+        );
+        assert_eq!(
+            DeviceKind::infer_from_name("USB Receiver"),
+            DeviceKind::Unknown
         );
     }
 }

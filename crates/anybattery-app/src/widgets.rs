@@ -79,6 +79,54 @@ pub fn section_title(ui: &mut Ui, p: &Palette, value: &str) {
     ui.add_space(2.0);
 }
 
+/// 32px 设备图标按钮，用于手动指定设备类型。图标、底色和边框与设备卡片一致。
+pub fn device_icon_button(
+    ui: &mut Ui,
+    p: &Palette,
+    kind: anybattery_core::DeviceKind,
+    selected: bool,
+) -> Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(30.0, 30.0), Sense::click());
+    let rect = theme::snap_rect(ui.ctx().pixels_per_point(), rect);
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    let fill = if selected { p.accent } else { p.control };
+    let border = if selected { p.accent } else { p.card_border };
+    let color = if selected {
+        p.on_accent
+    } else {
+        icons::device_accent(kind)
+    };
+    icons::pixel_frame(ui.painter(), rect, fill, border);
+    icons::draw_device_icon(
+        ui.painter(),
+        Rect::from_center_size(rect.center(), vec2(18.0, 18.0)),
+        kind,
+        color,
+    );
+    response.on_hover_text(kind.label_zh())
+}
+
+/// 24px 只读图标块，用于设置页展示设备当前图标。
+pub fn device_icon_tile(ui: &mut Ui, p: &Palette, kind: anybattery_core::DeviceKind) -> Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(24.0, 24.0), Sense::hover());
+    let rect = theme::snap_rect(ui.ctx().pixels_per_point(), rect);
+    icons::pixel_frame(
+        ui.painter(),
+        rect,
+        icons::device_accent(kind),
+        p.card_border,
+    );
+    icons::draw_device_icon(
+        ui.painter(),
+        Rect::from_center_size(rect.center(), vec2(16.0, 16.0)),
+        kind,
+        p.on_accent,
+    );
+    response
+}
+
 pub fn device_card(ui: &mut Ui, p: &Palette, device: &DeviceSnapshot, now: u64) -> Response {
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(vec2(width, CARD_HEIGHT), Sense::hover());

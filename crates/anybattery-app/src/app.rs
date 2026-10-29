@@ -6,7 +6,7 @@ use crate::tray::TrayHandle;
 use crate::tray_popup::{TrayHoverEvent, TrayPopupModel, TrayPopupState};
 use crate::widgets;
 use anybattery_core::{
-    BatteryStatus, DeviceSnapshot, Settings, Theme, UserProfileCatalog, now_unix,
+    BatteryStatus, DeviceKind, DeviceSnapshot, Settings, Theme, UserProfileCatalog, now_unix,
 };
 use anybattery_windows::{
     HidInterface, ScanEvent, ScanResult, monitor, scan_with_profiles_and_progress, system,
@@ -67,6 +67,17 @@ impl Filter {
     }
 }
 const SCAN_STALL_TIMEOUT: Duration = Duration::from_secs(20);
+
+const DEVICE_ICON_CHOICES: [DeviceKind; 8] = [
+    DeviceKind::Mouse,
+    DeviceKind::Keyboard,
+    DeviceKind::Headset,
+    DeviceKind::Earbuds,
+    DeviceKind::Speaker,
+    DeviceKind::Controller,
+    DeviceKind::Pen,
+    DeviceKind::Unknown,
+];
 
 struct ScanRequest {
     id: u64,
@@ -489,6 +500,13 @@ impl AnyBatteryApp {
         merge_device_list(&mut self.devices, devices);
         self.update_counts();
     }
+    fn effective_kind(&self, device: &DeviceSnapshot) -> DeviceKind {
+        self.settings
+            .icon_overrides
+            .get(&device.id.0)
+            .copied()
+            .unwrap_or(device.kind)
+    }
     fn update_counts(&mut self) {
         let mut bluetooth = 0;
         let mut wireless = 0;
@@ -500,7 +518,7 @@ impl AnyBatteryApp {
             if device.transport == anybattery_core::Transport::Usb24g {
                 wireless += 1;
             }
-            if device.kind == anybattery_core::DeviceKind::Controller {
+            if self.effective_kind(device) == DeviceKind::Controller {
                 controllers += 1;
             }
         }
@@ -1080,8 +1098,13 @@ impl AnyBatteryApp {
         }
         ui.add_space(10.0);
         let now = now_unix();
-        let filtered: Vec<&DeviceSnapshot> = self
-            .devices
+        // Manual icon choices also drive the filter and header counts, so a
+        // receiver the user reclassifies as a mouse moves to the right bucket.
+        let mut visible = self.devices.clone();
+        for device in &mut visible {
+            device.kind = self.effective_kind(device);
+        }
+        let filtered: Vec<&DeviceSnapshot> = visible
             .iter()
             .filter(|device| self.filter.matches(device))
             .collect();
@@ -1136,6 +1159,91 @@ impl AnyBatteryApp {
         {
             self.page = Page::Diagnostics;
         }
+    }
+    fn icon_settings(&mut self, ui: &mut Ui, p: &Palette) {
+        if self.devices.is_empty() {
+            ui.label(theme::rich(
+                "完成一次扫描后，可在这里为设备指定图标。",
+                11.0,
+                p.secondary,
+                false,
+            ));
+            return;
+        }
+        if !self.settings.icon_overrides.is_empty() {
+            ui.horizontal(|ui| {
+                ui.label(theme::rich(
+                    format!("手动指定 {} 台", self.settings.icon_overrides.len()),
+                    10.5,
+                    p.tertiary,
+                    false,
+                ));
+                if widgets::pill_button(ui, p, "全部恢复自动", false).clicked() {
+                    self.settings.icon_overrides.clear();
+                    self.save_settings();
+                    self.update_counts();
+                }
+            });
+        }
+
+        let devices = self.devices.clone();
+        for device in devices {
+            let id = device.id.0.clone();
+            let auto = device.kind;
+            let current = self.settings.icon_overrides.get(&id).copied();
+            let effective = current.unwrap_or(auto);
+
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                widgets::device_icon_tile(ui, p, effective);
+                ui.add_space(8.0);
+                ui.vertical(|ui| {
+                    let width = (ui.available_width() - 8.0).max(80.0);
+                    ui.label(theme::rich(
+                        widgets::fit_text(ui, &device.name, 12.0, true, width),
+                        12.0,
+                        p.text,
+                        true,
+                    ));
+                    let detail = match current {
+                        Some(kind) => format!("手动：{}", kind.label_zh()),
+                        None => format!("自动：{}", auto.label_zh()),
+                    };
+                    ui.label(theme::rich(detail, 10.0, p.tertiary, false));
+                });
+            });
+
+            let mut choice: Option<Option<DeviceKind>> = None;
+            ui.horizontal_wrapped(|ui| {
+                if widgets::pill_button(ui, p, "自动", current.is_none()).clicked() {
+                    choice = Some(None);
+                }
+                for kind in DEVICE_ICON_CHOICES {
+                    if widgets::device_icon_button(ui, p, kind, current == Some(kind)).clicked() {
+                        choice = Some(Some(kind));
+                    }
+                }
+            });
+            if let Some(choice) = choice {
+                match choice {
+                    Some(kind) => {
+                        self.settings.icon_overrides.insert(id, kind);
+                    }
+                    None => {
+                        self.settings.icon_overrides.remove(&id);
+                    }
+                }
+                self.save_settings();
+                self.update_counts();
+            }
+        }
+        ui.add_space(4.0);
+        ui.label(theme::rich(
+            "自动按产品名与协议识别；无法判断时选一个最接近的内置像素图标。",
+            10.0,
+            p.tertiary,
+            false,
+        ));
     }
     fn settings_page(&mut self, ui: &mut Ui, p: &Palette) {
         let available = ui.available_height() - 12.0;
@@ -1299,6 +1407,11 @@ impl AnyBatteryApp {
                         self.save_settings();
                         self.queue_rescan();
                     }
+                });
+                ui.add_space(14.0);
+                widgets::section_title(ui, p, "设备图标");
+                widgets::group(ui, p, |ui| {
+                    self.icon_settings(ui, p);
                 });
                 ui.add_space(14.0);
                 widgets::section_title(ui, p, "手动适配");

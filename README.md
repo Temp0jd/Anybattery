@@ -264,6 +264,7 @@ Razer 不是全系支持。下列型号必须同时命中 PID、vendor collectio
 - 默认只显示有电量的设备；可在设置中打开“显示无电池设备”
 - 单实例：第二次启动会唤起已有窗口，不会创建第二个托盘图标或第二份扫描
 - 托盘悬停摘要：鼠标在托盘图标上停留 250ms 后显示像素风小浮窗（设备数、有效读数、最低电量、最多 4 行设备、扫描时间）；非交互、鼠标穿透、不抢焦点，离开 180ms 后收起
+- 设备图标：按产品名/协议自动识别鼠标、键盘、耳机、耳塞、音箱、手柄、触控笔；无法识别时显示问号，可在“设置 → 设备图标”里为每台设备手动指定内置像素图标，选择会持久化并同步影响“手柄”筛选
 - 无网络请求、无遥测、不注入进程
 
 ## 构建
@@ -307,6 +308,7 @@ docs/                       设计图、截图与协议研究
 - 通用 BLE 设备仍依赖 Windows PnP 电量属性，未主动连接 GATT；Apple Continuity 只额外监听广播并绑定当前已连接设备，不等于通用 GATT 支持。
 - 手动适配 MVP 只适用于会主动发出输入报文（input report）的 2.4G 设备；不会主动查询 Feature/Output，也不支持 JSON 导入、充电位、CRC/TLV、多报告状态机。方案与边界见 [docs/manual-2.4g-matching-plan.md](docs/manual-2.4g-matching-plan.md)。
 - 托盘悬停浮窗替代原生 tooltip；它是非交互的鼠标穿透窗口，不能点击、滚动或固定。混合 DPI、多显示器、任务栏四方向和 Explorer 重启后的表现仍需 Windows 真机验收；wine 只验证启动和纯逻辑。
+- 手动设备图标只支持内置像素图标，不支持导入任意图片；覆盖按 `DeviceSnapshot.id` 保存，设备身份变化后需要重新选择。
 - 灵脉（FerrisPulse）电池协议的静态盘点见 [docs/protocol-research/ferrispulse-battery-inventory.md](docs/protocol-research/ferrispulse-battery-inventory.md)；清单不等于可直接导入的被动 profile。
 - 只有 Windows 真机能验证 HID / 蓝牙行为；Linux 侧可用 wine 跑 windows/app 的纯逻辑与 fixture 单测，但不覆盖真实驱动、固件或热插拔。
 - Corsair、Keychron、BlackShark / Barracuda Pro 的 Razer PA 已有生产 session/脚本传输测试，但仍无对应真机证据；Barracuda X (2022) 已单独完成本机验证。

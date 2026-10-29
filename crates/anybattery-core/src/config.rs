@@ -1,4 +1,7 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+use crate::model::DeviceKind;
 
 pub const MIN_POLL_SECS: u64 = 15;
 pub const MAX_POLL_SECS: u64 = 1800;
@@ -35,6 +38,9 @@ pub struct Settings {
     pub theme: Theme,
     pub language: Language,
     pub tray_per_device: bool,
+    /// 用户手动指定的设备图标；键是 `DeviceSnapshot.id`，值覆盖自动识别结果。
+    #[serde(default)]
+    pub icon_overrides: BTreeMap<String, DeviceKind>,
 }
 
 impl Default for Settings {
@@ -51,6 +57,7 @@ impl Default for Settings {
             theme: Theme::System,
             language: Language::ZhCn,
             tray_per_device: false,
+            icon_overrides: BTreeMap::new(),
         }
     }
 }
@@ -72,6 +79,29 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn icon_overrides_round_trip_and_default_to_empty() {
+        let default = Settings::default();
+        assert!(default.icon_overrides.is_empty());
+
+        let mut settings = Settings::default();
+        settings
+            .icon_overrides
+            .insert("hid:ABCD:1234:deadbeef".to_owned(), DeviceKind::Headset);
+        let text = serde_json::to_string(&settings).unwrap();
+        let parsed: Settings = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            parsed.icon_overrides.get("hid:ABCD:1234:deadbeef"),
+            Some(&DeviceKind::Headset)
+        );
+    }
+
+    #[test]
+    fn legacy_settings_without_icon_overrides_are_accepted() {
+        let parsed: Settings = serde_json::from_str(r#"{"poll_secs":60}"#).unwrap();
+        assert!(parsed.icon_overrides.is_empty());
+    }
 
     #[test]
     fn clamps_poll_interval() {
