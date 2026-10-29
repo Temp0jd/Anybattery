@@ -613,21 +613,54 @@ pub enum SegmentResult {
     Selected(usize),
 }
 
+/// Outer height of a [`segment`] control. The selected layer is inset by [`SEGMENT_INSET`],
+/// but the click target always covers the full height so the control is easy to hit.
+pub const SEGMENT_HEIGHT: f32 = 30.0;
+/// Inset of the selected layer inside the segment frame.
+pub const SEGMENT_INSET: f32 = 2.0;
+
+/// Equal-width column of one segment option.
+pub fn segment_column_rect(frame: Rect, index: usize, count: usize) -> Rect {
+    let count = count.max(1) as f32;
+    let seg_width = (frame.width() - SEGMENT_INSET * 2.0) / count;
+    Rect::from_min_size(
+        Pos2::new(
+            frame.left() + SEGMENT_INSET + index as f32 * seg_width,
+            frame.top(),
+        ),
+        vec2(seg_width, frame.height()),
+    )
+}
+
+/// Click target and text anchor: the full 30px column, not the 26px selected layer.
+pub fn segment_click_rect(frame: Rect, index: usize, count: usize) -> Rect {
+    segment_column_rect(frame, index, count)
+}
+
+/// Selected (and hover/indicator) layer, inset 2px on every side.
+pub fn segment_marker_rect(frame: Rect, index: usize, count: usize) -> Rect {
+    segment_column_rect(frame, index, count).shrink2(vec2(0.0, SEGMENT_INSET))
+}
+
 pub fn segment(ui: &mut Ui, p: &Palette, labels: &[&str], selected: usize) -> SegmentResult {
     let width = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(vec2(width, 32.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(vec2(width, SEGMENT_HEIGHT), Sense::hover());
     let rect = theme::snap_rect(ui.ctx().pixels_per_point(), rect);
     let painter = ui.painter();
     icons::draw_pixel_shadow(painter, rect, p.shadow);
     icons::pixel_frame(painter, rect, p.control, p.card_border);
-    let seg_width = (rect.width() - 4.0) / labels.len() as f32;
+    let count = labels.len().max(1);
+    let seg_width = (rect.width() - SEGMENT_INSET * 2.0) / count as f32;
     let marker_id = ui.id().with("segment-indicator");
     let shown = ui
         .ctx()
         .animate_value_with_time(marker_id, selected as f32, animation_secs(ui));
     let marker = Rect::from_min_size(
-        Pos2::new(rect.left() + 2.0 + shown * seg_width, rect.top() + 2.0),
-        vec2(seg_width, rect.height() - 4.0),
+        Pos2::new(
+            rect.left() + SEGMENT_INSET + shown * seg_width,
+            rect.top() + SEGMENT_INSET,
+        ),
+        vec2(seg_width, rect.height() - SEGMENT_INSET * 2.0),
     );
     painter.rect_filled(
         theme::snap_rect(ui.ctx().pixels_per_point(), marker),
@@ -636,14 +669,9 @@ pub fn segment(ui: &mut Ui, p: &Palette, labels: &[&str], selected: usize) -> Se
     );
     let mut result = SegmentResult::None;
     for (index, label) in labels.iter().enumerate() {
-        let seg = Rect::from_min_size(
-            Pos2::new(
-                rect.left() + 2.0 + index as f32 * seg_width,
-                rect.top() + 2.0,
-            ),
-            vec2(seg_width, rect.height() - 4.0),
-        );
-        let response = ui.interact(seg, Id::new(("segment", label, index)), Sense::click());
+        let seg = segment_marker_rect(rect, index, count);
+        let hit = segment_click_rect(rect, index, count);
+        let response = ui.interact(hit, Id::new(("segment", label, index)), Sense::click());
         let on_accent = index == selected;
         let hover = if on_accent {
             1.0
@@ -982,19 +1010,32 @@ fn draw_glyph(painter: &egui::Painter, rect: Rect, glyph: Glyph, color: Color32)
     }
 }
 
+/// Toggle width: the visual track and the click target share it.
+pub const TOGGLE_WIDTH: f32 = 44.0;
+/// Click target height. Taller than the track so the switch matches the control column.
+pub const TOGGLE_HIT_HEIGHT: f32 = SETTINGS_CONTROL_HEIGHT;
+/// Visual track height, vertically centred inside the hit rectangle.
+pub const TOGGLE_TRACK_HEIGHT: f32 = 24.0;
+
+/// Track of a toggle, centred in its 44x28 hit rectangle so the two can never drift apart.
+pub fn toggle_track_rect(hit: Rect) -> Rect {
+    Rect::from_center_size(hit.center(), vec2(TOGGLE_WIDTH, TOGGLE_TRACK_HEIGHT))
+}
+
 pub fn toggle(ui: &mut Ui, p: &Palette, value: &mut bool) -> bool {
-    let (rect, response) = ui.allocate_exact_size(vec2(44.0, 24.0), Sense::click());
-    let rect = theme::snap_rect(ui.ctx().pixels_per_point(), rect);
+    let (rect, response) =
+        ui.allocate_exact_size(vec2(TOGGLE_WIDTH, TOGGLE_HIT_HEIGHT), Sense::click());
     if response.clicked() {
         *value = !*value;
     }
     let t = ui.ctx().animate_bool(response.id, *value);
+    let track = theme::snap_rect(ui.ctx().pixels_per_point(), toggle_track_rect(rect));
     let track_color = theme::lerp_color(p.control, p.green, t);
-    icons::pixel_frame(ui.painter(), rect, track_color, p.card_border);
+    icons::pixel_frame(ui.painter(), track, track_color, p.card_border);
     let knob = Rect::from_min_size(
         Pos2::new(
-            rect.left() + 3.0 + t * (rect.width() - 22.0),
-            rect.top() + 3.0,
+            track.left() + 3.0 + t * (track.width() - 22.0),
+            track.top() + 3.0,
         ),
         vec2(16.0, 16.0),
     );
@@ -1012,6 +1053,32 @@ pub fn toggle(ui: &mut Ui, p: &Palette, value: &mut bool) -> bool {
     response.on_hover_cursor(CursorIcon::PointingHand).clicked()
 }
 
+/// One-line settings row height. Two text baselines (title + detail) and a 28px control
+/// column still fit, so settings pages stay scrollable in a 320x480 window.
+pub const SETTINGS_ROW_HEIGHT: f32 = 44.0;
+/// Fixed width of the control column at the right edge of a settings row.
+pub const SETTINGS_CONTROL_WIDTH: f32 = 56.0;
+/// Height of that control column: one 28px widget, vertically centred in the row.
+pub const SETTINGS_CONTROL_HEIGHT: f32 = 28.0;
+/// Left inset shared by the title and detail text.
+pub const SETTINGS_ROW_INSET: f32 = 12.0;
+/// Right inset of the control column, and the gap between text and control.
+pub const SETTINGS_CONTROL_GAP: f32 = 8.0;
+
+/// Text column width for a settings row of `row_width`.
+pub fn settings_text_width(row_width: f32) -> f32 {
+    (row_width - SETTINGS_ROW_INSET - SETTINGS_CONTROL_WIDTH - SETTINGS_CONTROL_GAP).max(40.0)
+}
+
+/// Right-aligned control column: 48x28, vertically centred in the 44px row.
+pub fn settings_control_rect(row: Rect) -> Rect {
+    let inset = (SETTINGS_ROW_HEIGHT - SETTINGS_CONTROL_HEIGHT) / 2.0;
+    Rect::from_min_max(
+        Pos2::new(row.right() - SETTINGS_CONTROL_WIDTH, row.top() + inset),
+        Pos2::new(row.right() - SETTINGS_CONTROL_GAP, row.bottom() - inset),
+    )
+}
+
 pub fn settings_row(
     ui: &mut Ui,
     p: &Palette,
@@ -1020,13 +1087,12 @@ pub fn settings_row(
     control: impl FnOnce(&mut Ui),
 ) {
     let width = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(vec2(width, 52.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(vec2(width, SETTINGS_ROW_HEIGHT), Sense::hover());
     // Control column is reserved first; the text column gets whatever is left.
-    let control_width = 120.0;
-    let text_width = (rect.width() - 12.0 - control_width - 10.0).max(40.0);
+    let text_width = settings_text_width(rect.width());
     let painter = ui.painter();
     painter.text(
-        Pos2::new(rect.left() + 12.0, rect.top() + 18.0),
+        Pos2::new(rect.left() + SETTINGS_ROW_INSET, rect.top() + 14.0),
         Align2::LEFT_CENTER,
         fit_text(ui, title, 12.0, false, text_width),
         FontId::new(12.0, FontFamily::Proportional),
@@ -1034,30 +1100,50 @@ pub fn settings_row(
     );
     if !detail.is_empty() {
         painter.text(
-            Pos2::new(rect.left() + 12.0, rect.top() + 36.0),
+            Pos2::new(rect.left() + SETTINGS_ROW_INSET, rect.top() + 32.0),
             Align2::LEFT_CENTER,
-            fit_text(ui, detail, 12.0, false, text_width),
-            FontId::new(12.0, FontFamily::Proportional),
+            fit_text(ui, detail, 11.0, false, text_width),
+            FontId::new(11.0, FontFamily::Proportional),
             p.tertiary,
         );
     }
+    let control_rect = settings_control_rect(rect);
     let mut child = ui.new_child(
         UiBuilder::new()
-            .max_rect(Rect::from_min_max(
-                Pos2::new(rect.right() - control_width, rect.top() + 14.0),
-                Pos2::new(rect.right() - 8.0, rect.bottom() - 14.0),
-            ))
+            .max_rect(control_rect)
             .layout(Layout::right_to_left(Align::Center)),
     );
     control(&mut child);
 }
 
+/// Default group padding. Roomy enough for mixed rows, still compact.
+pub const GROUP_PADDING: i8 = 6;
+/// Tight group padding, reserved for rows with an exact width budget (the 284px icon
+/// picker row) and other deliberately compact rows.
+pub const GROUP_COMPACT_PADDING: i8 = 4;
+const GROUP_BORDER: f32 = 2.0;
+
+/// Inner content width of a group whose outer width is `outer_width`. Used by width-budget
+/// helpers and tests, which is why it is not part of the rendering path.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn group_inner_width(outer_width: f32, padding: i8) -> f32 {
+    (outer_width - 2.0 * (GROUP_BORDER + f32::from(padding))).max(0.0)
+}
+
 pub fn group(ui: &mut Ui, p: &Palette, add: impl FnOnce(&mut Ui)) {
+    framed_group(ui, p, GROUP_PADDING, add);
+}
+
+pub fn group_compact(ui: &mut Ui, p: &Palette, add: impl FnOnce(&mut Ui)) {
+    framed_group(ui, p, GROUP_COMPACT_PADDING, add);
+}
+
+fn framed_group(ui: &mut Ui, p: &Palette, padding: i8, add: impl FnOnce(&mut Ui)) {
     egui::Frame::new()
         .fill(p.card)
-        .stroke(Stroke::new(2.0, p.card_border))
+        .stroke(Stroke::new(GROUP_BORDER, p.card_border))
         .corner_radius(CornerRadius::ZERO)
-        .inner_margin(egui::Margin::symmetric(4, 4))
+        .inner_margin(egui::Margin::symmetric(padding, padding))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             add(ui);
@@ -1454,7 +1540,7 @@ mod card_tests {
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
             // 320px window: 296px page content, then the group border and padding take 12px.
             ui.set_width(296.0);
-            group(ui, &p, |ui| {
+            group_compact(ui, &p, |ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 ui.horizontal(|ui| {
                     let mut collect = |response: Response| rects.borrow_mut().push(response.rect);
@@ -1515,5 +1601,104 @@ mod card_tests {
             }
             assert!((cells[cells.len() - 1].right() - bar.right()).abs() < 0.01);
         }
+    }
+}
+
+#[cfg(test)]
+mod rhythm_tests {
+    use super::*;
+
+    #[test]
+    fn settings_row_keeps_the_44px_rhythm() {
+        assert_eq!(SETTINGS_ROW_HEIGHT, 44.0);
+        assert_eq!(SETTINGS_CONTROL_WIDTH, 56.0);
+        // At 320px the settings content is 296px wide; the text column keeps the rest.
+        assert_eq!(settings_text_width(296.0), 296.0 - 12.0 - 56.0 - 8.0);
+        assert_eq!(settings_text_width(40.0), 40.0, "never negative");
+
+        let row = Rect::from_min_size(Pos2::new(10.0, 20.0), vec2(296.0, SETTINGS_ROW_HEIGHT));
+        let control = settings_control_rect(row);
+        assert_eq!((control.width(), control.height()), (48.0, 28.0));
+        assert_eq!(control.right(), row.right() - 8.0);
+        assert_eq!(control.center().y, row.center().y);
+        assert!(row.contains_rect(control));
+        // Title at +14 and detail at +32 both stay inside the 44px row.
+        assert!(row.top() + 14.0 + 6.0 < row.bottom());
+        assert!(row.top() + 32.0 + 6.0 <= row.bottom());
+
+        // The toggle hit rectangle is 44x28 and fills the control column.
+        assert_eq!(SETTINGS_CONTROL_HEIGHT, 28.0);
+        assert_eq!(TOGGLE_HIT_HEIGHT, SETTINGS_CONTROL_HEIGHT);
+        let hit = Rect::from_min_size(
+            control.right_top() - vec2(TOGGLE_WIDTH, 0.0),
+            vec2(TOGGLE_WIDTH, TOGGLE_HIT_HEIGHT),
+        );
+        assert_eq!((hit.width(), hit.height()), (44.0, 28.0));
+        assert_eq!(hit.height(), control.height());
+        assert!(control.contains_rect(hit));
+        let track = toggle_track_rect(hit);
+        assert_eq!((track.width(), track.height()), (44.0, 24.0));
+        assert_eq!(track.center(), hit.center());
+        assert!(hit.contains_rect(track));
+    }
+
+    #[test]
+    fn segment_clicks_the_full_30px_column() {
+        assert_eq!(SEGMENT_HEIGHT, 30.0);
+        let frame = Rect::from_min_size(Pos2::new(4.0, 8.0), vec2(280.0, SEGMENT_HEIGHT));
+        let count = 4;
+        let column = (280.0 - SEGMENT_INSET * 2.0) / count as f32;
+        let mut previous_right = frame.left() + SEGMENT_INSET;
+        for index in 0..count {
+            let click = segment_click_rect(frame, index, count);
+            let marker = segment_marker_rect(frame, index, count);
+            assert_eq!(click.height(), SEGMENT_HEIGHT, "click must be 30px tall");
+            assert_eq!(marker.height(), SEGMENT_HEIGHT - 4.0);
+            assert!((click.width() - column).abs() < 0.01, "uneven columns");
+            assert!(
+                (click.left() - previous_right).abs() < 0.01,
+                "gap or overlap"
+            );
+            assert!(click.contains_rect(marker));
+            assert_eq!(marker.center().y, click.center().y);
+            assert_eq!(click.center().x, marker.center().x);
+            previous_right = click.right();
+        }
+        assert!((previous_right - (frame.right() - SEGMENT_INSET)).abs() < 0.01);
+    }
+
+    #[test]
+    fn group_padding_matches_the_layout_budget() {
+        // Pure arithmetic first: 296px is the settings content width at a 320px window.
+        assert_eq!(group_inner_width(296.0, GROUP_PADDING), 280.0);
+        assert_eq!(group_inner_width(296.0, GROUP_COMPACT_PADDING), 284.0);
+        assert_eq!(group_inner_width(8.0, GROUP_PADDING), 0.0, "no negative");
+
+        // Then a real frame probe, so the constants cannot drift from egui's margin maths.
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        let p = theme::palette(false);
+        let widths = std::cell::RefCell::new(Vec::new());
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.set_width(296.0);
+            group(ui, &p, |ui| widths.borrow_mut().push(ui.available_width()));
+            ui.set_width(296.0);
+            group_compact(ui, &p, |ui| widths.borrow_mut().push(ui.available_width()));
+        });
+        output.textures_delta.clear();
+        let widths = widths.into_inner();
+        assert_eq!(widths.len(), 2);
+        assert!(
+            (widths[0] - 280.0).abs() < 0.01,
+            "group inner {}",
+            widths[0]
+        );
+        assert!(
+            (widths[1] - 284.0).abs() < 0.01,
+            "compact group inner {}",
+            widths[1]
+        );
+        // The icon picker's 9-choice row needs exactly the compact budget.
+        assert_eq!(widths[1], CHOICE_SIZE * 9.0 + 4.0 * 8.0);
     }
 }

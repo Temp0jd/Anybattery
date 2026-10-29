@@ -72,6 +72,9 @@ const ICON_PICKER_HEIGHT: f32 = 72.0;
 /// Inline icon picker geometry: nine 28px choices with 4px gaps are exactly 284px.
 const ICON_CHOICE_SIZE: f32 = widgets::CHOICE_SIZE;
 const ICON_CHOICE_GAP: f32 = 4.0;
+/// Diagnostics log frame: a 2px pixel border and 8px inner padding around the scroll area.
+const DIAGNOSTICS_BORDER: f32 = 2.0;
+const DIAGNOSTICS_PADDING: i8 = 8;
 
 const DEVICE_ICON_CHOICES: [DeviceKind; 8] = [
     DeviceKind::Mouse,
@@ -1267,7 +1270,8 @@ impl AnyBatteryApp {
         let mut close = false;
         let mut choice: Option<Option<DeviceKind>> = None;
 
-        widgets::group(ui, p, |ui| {
+        // The compact group keeps the 284px budget the nine-choice row needs.
+        widgets::group_compact(ui, p, |ui| {
             // Two 28px rows with the same 4px gap: 12 + 28 + 4 + 28 == ICON_PICKER_HEIGHT.
             ui.spacing_mut().item_spacing.y = ICON_CHOICE_GAP;
             ui.horizontal(|ui| {
@@ -1330,24 +1334,21 @@ impl AnyBatteryApp {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                ui.add_space(10.0);
+                ui.add_space(6.0);
                 widgets::section_title(ui, p, "刷新");
                 widgets::group(ui, p, |ui| {
-                    ui.add_space(6.0);
                     ui.horizontal(|ui| {
-                        ui.add_space(10.0);
-                        ui.label(theme::rich("刷新间隔", 13.5, p.text, false));
+                        ui.label(theme::rich("刷新间隔", 12.0, p.text, false));
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            ui.add_space(10.0);
                             ui.label(theme::rich(
                                 widgets::interval_text(self.settings.poll_secs),
-                                12.5,
+                                12.0,
                                 p.secondary,
                                 true,
                             ));
                         });
                     });
-                    ui.spacing_mut().slider_width = (ui.available_width() - 28.0).max(120.0);
+                    ui.spacing_mut().slider_width = (ui.available_width() - 6.0).max(120.0);
                     let mut poll = self.settings.poll_secs as f32;
                     let slider = ui.add(
                         egui::Slider::new(&mut poll, 15.0..=1800.0)
@@ -1366,8 +1367,10 @@ impl AnyBatteryApp {
                         self.save_settings();
                     }
                     self.poll_dragging = holding;
-                    ui.horizontal(|ui| {
-                        ui.add_space(10.0);
+                    ui.add_space(4.0);
+                    // 4px gaps keep four presets on one row at 400px and wrap them at 320px.
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
                         for (label, value) in [
                             ("30 秒", 30u64),
                             ("1 分钟", 60),
@@ -1382,9 +1385,8 @@ impl AnyBatteryApp {
                             }
                         }
                     });
-                    ui.add_space(8.0);
                 });
-                ui.add_space(14.0);
+                ui.add_space(8.0);
                 widgets::section_title(ui, p, "通知");
                 widgets::group(ui, p, |ui| {
                     let mut value = self.settings.notify_low_battery;
@@ -1403,44 +1405,27 @@ impl AnyBatteryApp {
                         self.save_settings();
                     }
                 });
-                ui.add_space(14.0);
+                ui.add_space(8.0);
                 widgets::section_title(ui, p, "外观");
                 widgets::group(ui, p, |ui| {
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        ui.add_space(10.0);
-                        ui.label(theme::rich("主题", 13.5, p.text, false));
-                    });
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        ui.add_space(10.0);
-                        let selected = match self.settings.theme {
-                            Theme::System => 0,
-                            Theme::Light => 1,
-                            Theme::Dark => 2,
+                    ui.label(theme::rich("主题", 12.0, p.text, false));
+                    let selected = match self.settings.theme {
+                        Theme::System => 0,
+                        Theme::Light => 1,
+                        Theme::Dark => 2,
+                    };
+                    if let widgets::SegmentResult::Selected(index) =
+                        widgets::segment(ui, p, &["跟随系统", "浅色", "深色"], selected)
+                    {
+                        self.settings.theme = match index {
+                            1 => Theme::Light,
+                            2 => Theme::Dark,
+                            _ => Theme::System,
                         };
-                        let width = (ui.available_width() - 10.0).max(120.0);
-                        let (seg_rect, _) =
-                            ui.allocate_exact_size(vec2(width, 34.0), Sense::hover());
-                        let mut child = ui.new_child(
-                            UiBuilder::new()
-                                .max_rect(seg_rect)
-                                .layout(Layout::top_down(Align::LEFT)),
-                        );
-                        if let widgets::SegmentResult::Selected(index) =
-                            widgets::segment(&mut child, p, &["跟随系统", "浅色", "深色"], selected)
-                        {
-                            self.settings.theme = match index {
-                                1 => Theme::Light,
-                                2 => Theme::Dark,
-                                _ => Theme::System,
-                            };
-                            self.dark = theme::resolve_dark(self.settings.theme);
-                            self.applied_dark = None;
-                            self.save_settings();
-                        }
-                    });
-                    ui.add_space(8.0);
+                        self.dark = theme::resolve_dark(self.settings.theme);
+                        self.applied_dark = None;
+                        self.save_settings();
+                    }
                     let mut animations = self.settings.animations;
                     let mut changed = false;
                     widgets::settings_row(ui, p, "动画", "面板与电量的过渡效果", |ui| {
@@ -1451,7 +1436,7 @@ impl AnyBatteryApp {
                         self.save_settings();
                     }
                 });
-                ui.add_space(14.0);
+                ui.add_space(8.0);
                 widgets::section_title(ui, p, "系统");
                 widgets::group(ui, p, |ui| {
                     let mut autostart = self.settings.autostart;
@@ -1486,25 +1471,29 @@ impl AnyBatteryApp {
                         self.queue_rescan();
                     }
                 });
-                ui.add_space(14.0);
+                ui.add_space(8.0);
                 widgets::section_title(ui, p, "手动适配");
                 widgets::group(ui, p, |ui| {
-                    ui.label(theme::rich(
-                        format!(
-                            "用户配置 {} 个（启用 {} 个）· 只读被动监听，不发送查询/写入",
-                            self.profiles.profiles().len(),
-                            self.profiles.enabled_profiles().count()
-                        ),
-                        10.5,
-                        p.secondary,
-                        false,
-                    ));
+                    // 11px stats wrap inside the group (at most two rows), never sideways.
+                    let stats = format!(
+                        "用户配置 {} 个（启用 {} 个）· 只读被动监听，不发送查询/写入",
+                        self.profiles.profiles().len(),
+                        self.profiles.enabled_profiles().count()
+                    );
+                    let width = ui.available_width();
+                    let galley =
+                        widgets::wrapped_galley(ui, &stats, 11.0, false, width, 2, p.secondary);
+                    let (rect, _) =
+                        ui.allocate_exact_size(vec2(width, galley.size().y), Sense::hover());
+                    ui.painter().galley(rect.min, galley, p.secondary);
+                    ui.add_space(4.0);
                     if widgets::pill_button(ui, p, "打开手动适配向导", false).clicked() {
                         self.page = Page::ProtocolWizard;
                     }
                 });
-                ui.add_space(14.0);
-                ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
                     if widgets::pill_button(ui, p, "打开配置目录", false).clicked() {
                         let _ = std::process::Command::new("explorer")
                             .arg(storage::data_dir())
@@ -1520,12 +1509,14 @@ impl AnyBatteryApp {
                         }
                     }
                 });
-                ui.add_space(18.0);
+                ui.add_space(8.0);
             });
     }
     fn diagnostics_page(&mut self, ui: &mut Ui, p: &Palette) {
-        ui.add_space(10.0);
-        ui.horizontal(|ui| {
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            // 4px gaps: two rows at 320px, one row from 400px up; never overlapping.
+            ui.spacing_mut().item_spacing.x = 4.0;
             let refresh_label = if self.scanning {
                 "扫描中…"
             } else {
@@ -1549,30 +1540,42 @@ impl AnyBatteryApp {
                     .spawn();
             }
         });
-        ui.add_space(8.0);
+        ui.add_space(6.0);
+        // 11px summary, elided to the available width; the full text stays in the copied data.
+        let summary = format!(
+            "设备 {} · 蓝牙 {} · 2.4G {} · 手柄 {} · 每 {} 刷新",
+            self.devices.len(),
+            self.counts.0,
+            self.counts.1,
+            self.counts.2,
+            widgets::interval_text(self.settings.poll_secs)
+        );
+        let summary_width = ui.available_width();
         ui.label(theme::rich(
-            format!(
-                "设备 {} · 蓝牙 {} · 2.4G {} · 手柄 {} · 每 {} 刷新",
-                self.devices.len(),
-                self.counts.0,
-                self.counts.1,
-                self.counts.2,
-                widgets::interval_text(self.settings.poll_secs)
-            ),
-            10.5,
+            widgets::fit_text(ui, &summary, 11.0, false, summary_width),
+            11.0,
             p.tertiary,
             false,
         ));
         ui.add_space(6.0);
-        let height = (ui.available_height() - 12.0).max(80.0);
+        // The log owns whatever height is left. A tiny window clamps to zero instead of
+        // pushing the frame past the page bottom.
+        let log_height = diagnostics_log_height(
+            ui.available_height(),
+            DIAGNOSTICS_BORDER,
+            f32::from(DIAGNOSTICS_PADDING),
+        );
         egui::Frame::new()
             .fill(p.card)
-            .stroke(Stroke::new(2.0, p.card_border))
+            .stroke(Stroke::new(DIAGNOSTICS_BORDER, p.card_border))
             .corner_radius(CornerRadius::ZERO)
-            .inner_margin(egui::Margin::symmetric(12, 10))
+            .inner_margin(egui::Margin::symmetric(
+                DIAGNOSTICS_PADDING,
+                DIAGNOSTICS_PADDING,
+            ))
             .show(ui, |ui| {
                 egui::ScrollArea::vertical()
-                    .max_height(height - 24.0)
+                    .max_height(log_height)
                     .auto_shrink([false, false])
                     .stick_to_bottom(true)
                     .show(ui, |ui| {
@@ -1580,7 +1583,7 @@ impl AnyBatteryApp {
                         for line in &self.diagnostics {
                             ui.label(
                                 RichText::new(line)
-                                    .size(12.0)
+                                    .size(11.0)
                                     .color(p.secondary)
                                     .monospace(),
                             );
@@ -1805,14 +1808,21 @@ fn merge_device_list(devices: &mut Vec<DeviceSnapshot>, partial: Vec<DeviceSnaps
     sort_devices_for_display(devices);
 }
 
-/// Available content width for the inline icon picker: window width minus the page margins,
-/// the group 2px border and its 4px inner padding on both sides. Test-only: it exists so the
-/// 284px budget is checked as pure arithmetic instead of by eye.
+/// Height left for the diagnostics log inside its frame: the page remainder minus the
+/// border and padding on both sides. Clamped at zero so a tiny window cannot push the frame
+/// past the page bottom.
+fn diagnostics_log_height(available: f32, border: f32, padding: f32) -> f32 {
+    (available - 2.0 * (border + padding)).max(0.0)
+}
+
+/// Available content width for the inline icon picker: window width minus the page margins
+/// and the compact group border plus padding. Test-only: it exists so the 284px budget is
+/// checked as pure arithmetic instead of by eye.
 #[cfg(test)]
 fn icon_picker_inner_width(window_width: f32) -> f32 {
     let metrics = theme::layout_metrics(window_width);
     let content = window_width - metrics.margin_x * 2.0;
-    content - 2.0 * (2.0 + 4.0)
+    widgets::group_inner_width(content, widgets::GROUP_COMPACT_PADDING)
 }
 
 /// Split a low-battery alert so a narrow banner can keep the device name on row one and the
@@ -1957,8 +1967,12 @@ mod tests {
         assert_eq!(ICON_CHOICE_GAP, 4.0);
         let needed = ICON_CHOICE_SIZE * 9.0 + ICON_CHOICE_GAP * 8.0;
         assert_eq!(needed, 284.0);
-        // At 320px the page content is 296px; border and padding take 12px of that.
+        // At 320px the page content is 296px; the compact group border and padding take 12px.
         assert_eq!(icon_picker_inner_width(320.0), 284.0);
+        assert_eq!(
+            icon_picker_inner_width(320.0),
+            widgets::group_inner_width(296.0, widgets::GROUP_COMPACT_PADDING)
+        );
         for width in [320.0, 360.0, 400.0, 430.0] {
             let inner = icon_picker_inner_width(width);
             assert!(
@@ -1966,11 +1980,40 @@ mod tests {
                 "picker row {needed}px does not fit {inner}px at {width}px"
             );
         }
-        // Two 28px rows, one 4px gap and 12px of group border plus padding.
+        // Two 28px rows, one 4px gap and the compact group border plus padding.
         assert_eq!(
             ICON_PICKER_HEIGHT,
-            ICON_CHOICE_SIZE * 2.0 + ICON_CHOICE_GAP + 12.0
+            ICON_CHOICE_SIZE * 2.0
+                + ICON_CHOICE_GAP
+                + 2.0 * (2.0 + f32::from(widgets::GROUP_COMPACT_PADDING))
         );
+    }
+
+    #[test]
+    fn diagnostics_log_height_never_goes_negative() {
+        assert_eq!(diagnostics_log_height(0.0, 2.0, 8.0), 0.0);
+        assert_eq!(diagnostics_log_height(19.0, 2.0, 8.0), 0.0);
+        assert_eq!(diagnostics_log_height(-400.0, 2.0, 8.0), 0.0);
+        assert!(diagnostics_log_height(21.0, 2.0, 8.0) > 0.0);
+
+        // 320x480 minimum window: page content minus header, a wrapped two-row action bar,
+        // the 11px summary and the 6px gaps still leaves a usable log area.
+        let log_at = |width: f32, height: f32, action_height: f32| {
+            let metrics = theme::layout_metrics(width);
+            let content =
+                height - widgets::TITLEBAR_HEIGHT - metrics.content_top - metrics.content_bottom;
+            let page = content - metrics.header_height - 6.0;
+            let available = page - 6.0 - action_height - 6.0 - 14.0 - 6.0;
+            diagnostics_log_height(
+                available,
+                DIAGNOSTICS_BORDER,
+                f32::from(DIAGNOSTICS_PADDING),
+            )
+        };
+        let narrow = log_at(320.0, 480.0, 28.0 * 2.0 + 6.0);
+        let default = log_at(400.0, 528.0, 28.0);
+        assert!(narrow >= 1.0, "narrow log height {narrow}");
+        assert!(default > narrow, "default {default} vs narrow {narrow}");
     }
 
     #[test]
