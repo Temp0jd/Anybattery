@@ -6,9 +6,15 @@ use std::time::{Duration, Instant};
 
 use crate::icons;
 use crate::theme::{self, Palette};
-use anybattery_core::{BatteryReading, BatteryStatus, CoarseLevel, DeviceSnapshot, age_text};
+use anybattery_core::{
+    BatteryReading, BatteryStatus, CoarseLevel, Confidence, DeviceSnapshot, age_text,
+};
 
-pub const CARD_HEIGHT: f32 = 78.0;
+pub const CARD_HEIGHT: f32 = 68.0;
+/// Gap between two cards in the home list; the list height budget uses the same value.
+pub const CARD_GAP: f32 = 6.0;
+/// Edge length of one icon/text choice button. Nine of them plus gaps are exactly 284px wide.
+pub const CHOICE_SIZE: f32 = 28.0;
 
 /// Animations stay short: feedback, never decoration.
 const ANIMATION_SECS: f32 = 0.15;
@@ -79,14 +85,14 @@ pub fn section_title(ui: &mut Ui, p: &Palette, value: &str) {
     ui.add_space(2.0);
 }
 
-/// 32px 设备图标按钮，用于手动指定设备类型。图标、底色和边框与设备卡片一致。
+/// 28px 设备图标按钮，用于手动指定设备类型。图标、底色和边框与设备卡片一致。
 pub fn device_icon_button(
     ui: &mut Ui,
     p: &Palette,
     kind: anybattery_core::DeviceKind,
     selected: bool,
 ) -> Response {
-    let (rect, response) = ui.allocate_exact_size(vec2(30.0, 30.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(vec2(CHOICE_SIZE, CHOICE_SIZE), Sense::click());
     let rect = theme::snap_rect(ui.ctx().pixels_per_point(), rect);
     if response.hovered() {
         ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
@@ -101,14 +107,16 @@ pub fn device_icon_button(
     icons::pixel_frame(ui.painter(), rect, fill, border);
     icons::draw_device_icon(
         ui.painter(),
-        Rect::from_center_size(rect.center(), vec2(18.0, 18.0)),
+        Rect::from_center_size(rect.center(), vec2(16.0, 16.0)),
         kind,
         color,
     );
     response.on_hover_text(kind.label_zh())
 }
 
-/// 24px 只读图标块，用于设置页展示设备当前图标。
+/// 24px 只读图标块，用于展示设备当前图标。内联选择器现在只用文字摘要，因此这个只读块
+/// 保留了给设置/摘要视图复用。
+#[allow(dead_code)]
 pub fn device_icon_tile(ui: &mut Ui, p: &Palette, kind: anybattery_core::DeviceKind) -> Response {
     let (rect, response) = ui.allocate_exact_size(vec2(24.0, 24.0), Sense::hover());
     let rect = theme::snap_rect(ui.ctx().pixels_per_point(), rect);
@@ -127,6 +135,75 @@ pub fn device_icon_tile(ui: &mut Ui, p: &Palette, kind: anybattery_core::DeviceK
     response
 }
 
+/// 28px 文本选项按钮（“自动”“收起”）：字形与内边距都收在 28px 内，不会撑破图标行。
+pub fn text_choice_button(ui: &mut Ui, p: &Palette, label: &str, selected: bool) -> Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(CHOICE_SIZE, CHOICE_SIZE), Sense::click());
+    let rect = theme::snap_rect(ui.ctx().pixels_per_point(), rect);
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    let hover = ui.ctx().animate_bool(response.id, response.hovered());
+    let fill = if selected {
+        p.accent
+    } else {
+        theme::lerp_color(p.control, p.hover, hover)
+    };
+    let border = if selected { p.accent } else { p.card_border };
+    icons::pixel_frame(ui.painter(), rect, fill, border);
+    let color = if selected {
+        p.on_accent
+    } else {
+        theme::lerp_color(p.secondary, p.text, hover)
+    };
+    ui.painter().text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        fit_text(ui, label, 10.5, true, rect.width() - 2.0),
+        FontId::new(10.5, FontFamily::Name("bold".into())),
+        color,
+    );
+    response
+}
+
+/// Text wrapped to at most `max_rows` rows, so a narrow banner or toast can use two lines and
+/// elide instead of spilling sideways. Uses the real font, so the caller can size to it.
+pub fn wrapped_galley(
+    ui: &Ui,
+    text: &str,
+    size: f32,
+    bold: bool,
+    max_width: f32,
+    max_rows: usize,
+    color: Color32,
+) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob {
+        wrap: egui::text::TextWrapping {
+            max_width: max_width.max(16.0),
+            max_rows,
+            break_anywhere: false,
+            overflow_character: Some('…'),
+        },
+        ..Default::default()
+    };
+    job.append(
+        text,
+        0.0,
+        egui::text::TextFormat {
+            font_id: FontId::new(
+                size,
+                if bold {
+                    FontFamily::Name("bold".into())
+                } else {
+                    FontFamily::Proportional
+                },
+            ),
+            color,
+            ..Default::default()
+        },
+    );
+    ui.ctx().fonts_mut(|fonts| fonts.layout_job(job))
+}
+
 pub fn device_card(ui: &mut Ui, p: &Palette, device: &DeviceSnapshot, now: u64) -> Response {
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(vec2(width, CARD_HEIGHT), Sense::click());
@@ -142,10 +219,7 @@ pub fn device_card(ui: &mut Ui, p: &Palette, device: &DeviceSnapshot, now: u64) 
     icons::pixel_frame(painter, rect, fill, p.card_border);
 
     let accent = icons::device_accent(device.kind);
-    let tile = Rect::from_min_size(
-        Pos2::new(rect.left() + 12.0, rect.top() + 12.0),
-        vec2(32.0, 32.0),
-    );
+    let tile = card_icon_rect(rect);
     icons::pixel_frame(painter, tile, accent, p.card_border);
     icons::draw_device_icon(
         painter,
@@ -155,14 +229,13 @@ pub fn device_card(ui: &mut Ui, p: &Palette, device: &DeviceSnapshot, now: u64) 
     );
 
     // Right column: the reading. Its width is measured once and shared by all rows.
-    let right = rect.right() - 12.0;
     let reading_width = match device.battery {
         BatteryReading::Percent { level, .. } => percent_text_width(ui, level).max(BAR_WIDTH),
         BatteryReading::Coarse { level } => ui
             .painter()
             .layout_no_wrap(
                 level.label_zh().to_owned(),
-                FontId::new(18.0, FontFamily::Name("bold".into())),
+                FontId::new(16.0, FontFamily::Name("bold".into())),
                 p.secondary,
             )
             .size()
@@ -170,25 +243,22 @@ pub fn device_card(ui: &mut Ui, p: &Palette, device: &DeviceSnapshot, now: u64) 
             .max(BAR_WIDTH),
         BatteryReading::Unknown => BAR_WIDTH,
     };
-    let left = rect.left() + 56.0;
-    let text_width = (right - reading_width - 10.0 - left).max(16.0);
+    let left = card_text_left(rect);
+    let right = card_right_edge(rect);
+    let text_width = card_text_width(rect, reading_width);
+    let density = DetailDensity::for_text_width(text_width);
 
-    let title_font = FontId::new(12.0, FontFamily::Name("bold".into()));
     painter.text(
-        Pos2::new(left, rect.top() + 26.0),
+        Pos2::new(left, card_name_y(rect)),
         Align2::LEFT_CENTER,
         fit_text(ui, &device.name, 12.0, true, text_width),
-        title_font.clone(),
+        FontId::new(12.0, FontFamily::Name("bold".into())),
         p.text,
     );
     // States that are easy to confuse with a plain reading get a small text tag that does not
     // rely on colour alone.
     if let Some(label) = status_badge(device.status) {
-        let font = FontId::new(10.0, FontFamily::Proportional);
-        let badge = Rect::from_min_size(
-            Pos2::new(rect.left() + 10.0, rect.top() + 50.0),
-            vec2(30.0, 14.0),
-        );
+        let badge = card_badge_rect(rect);
         painter.rect_filled(badge, CornerRadius::ZERO, p.control);
         painter.rect_stroke(
             badge,
@@ -200,14 +270,20 @@ pub fn device_card(ui: &mut Ui, p: &Palette, device: &DeviceSnapshot, now: u64) 
             badge.center(),
             Align2::CENTER_CENTER,
             label,
-            font,
+            FontId::new(11.0, FontFamily::Proportional),
             p.secondary,
         );
     }
     painter.text(
-        Pos2::new(left, rect.top() + 48.0),
+        Pos2::new(left, card_detail_y(rect)),
         Align2::LEFT_CENTER,
-        fit_text(ui, &device_detail(device, now), 12.0, false, text_width),
+        fit_text(
+            ui,
+            &device_detail(device, now, density),
+            12.0,
+            false,
+            text_width,
+        ),
         FontId::new(12.0, FontFamily::Proportional),
         p.secondary,
     );
@@ -217,16 +293,13 @@ pub fn device_card(ui: &mut Ui, p: &Palette, device: &DeviceSnapshot, now: u64) 
         BatteryReading::Percent { level, .. } => {
             let color = theme::battery_color_for_level(*p, level);
             painter.text(
-                Pos2::new(right, rect.top() + 24.0),
+                Pos2::new(right, card_name_y(rect)),
                 Align2::RIGHT_CENTER,
                 format!("{}%", level),
-                FontId::new(24.0, FontFamily::Name("bold".into())),
+                FontId::new(22.0, FontFamily::Name("bold".into())),
                 p.text,
             );
-            let bar = Rect::from_min_size(
-                Pos2::new(right - BAR_WIDTH, rect.top() + 48.0),
-                vec2(BAR_WIDTH, 12.0),
-            );
+            let bar = card_bar_rect(rect);
             let target = level.min(100) as f32 / 100.0;
             // Keyed by device, not list position, so sorting or filtering cannot hand one
             // device's animation state to another.
@@ -238,31 +311,28 @@ pub fn device_card(ui: &mut Ui, p: &Palette, device: &DeviceSnapshot, now: u64) 
         }
         BatteryReading::Coarse { level } => {
             painter.text(
-                Pos2::new(right, rect.top() + 26.0),
+                Pos2::new(right, card_name_y(rect)),
                 Align2::RIGHT_CENTER,
                 level.label_zh(),
-                FontId::new(18.0, FontFamily::Name("bold".into())),
+                FontId::new(16.0, FontFamily::Name("bold".into())),
                 p.secondary,
             );
-            let bar = Rect::from_min_size(
-                Pos2::new(right - BAR_WIDTH, rect.top() + 48.0),
-                vec2(BAR_WIDTH, 12.0),
-            );
-            coarse_pixel_battery(painter, p, bar, level);
+            coarse_pixel_battery(painter, p, card_bar_rect(rect), level);
         }
         BatteryReading::Unknown => {
+            let bar = card_bar_rect(rect);
             painter.text(
-                Pos2::new(right, rect.top() + 26.0),
+                Pos2::new(right, card_name_y(rect)),
                 Align2::RIGHT_CENTER,
                 "---",
-                FontId::new(20.0, FontFamily::Name("bold".into())),
+                FontId::new(18.0, FontFamily::Name("bold".into())),
                 p.tertiary,
             );
             painter.text(
-                Pos2::new(right, rect.top() + 50.0),
+                Pos2::new(right, bar.center().y),
                 Align2::RIGHT_CENTER,
                 "无电量",
-                FontId::new(12.0, FontFamily::Proportional),
+                FontId::new(11.0, FontFamily::Proportional),
                 p.tertiary,
             );
         }
@@ -274,7 +344,81 @@ pub fn device_card(ui: &mut Ui, p: &Palette, device: &DeviceSnapshot, now: u64) 
     })
 }
 
-const BAR_WIDTH: f32 = 58.0;
+const BAR_WIDTH: f32 = 54.0;
+const BAR_HEIGHT: f32 = 10.0;
+const PERCENT_CELLS: usize = 8;
+const PERCENT_CELL_GAP: f32 = 1.5;
+const COARSE_CELLS: usize = 3;
+const COARSE_CELL_GAP: f32 = 2.0;
+/// Card inset on every side; the icon and text columns start inside it.
+const CARD_EDGE: f32 = 10.0;
+const CARD_TEXT_LEFT: f32 = 52.0;
+/// Minimum breathing room between the name column and the right reading column.
+const CARD_COLUMN_GAP: f32 = 8.0;
+
+fn card_icon_rect(card: Rect) -> Rect {
+    Rect::from_min_size(
+        Pos2::new(card.left() + CARD_EDGE, card.top() + CARD_EDGE),
+        vec2(32.0, 32.0),
+    )
+}
+
+fn card_badge_rect(card: Rect) -> Rect {
+    Rect::from_min_size(
+        Pos2::new(card.left() + CARD_EDGE, card.top() + 48.0),
+        vec2(30.0, 12.0),
+    )
+}
+
+fn card_bar_rect(card: Rect) -> Rect {
+    Rect::from_min_size(
+        Pos2::new(card_right_edge(card) - BAR_WIDTH, card_detail_y(card)),
+        vec2(BAR_WIDTH, BAR_HEIGHT),
+    )
+}
+
+fn card_name_y(card: Rect) -> f32 {
+    card.top() + 21.0
+}
+
+fn card_detail_y(card: Rect) -> f32 {
+    card.top() + 43.0
+}
+
+fn card_text_left(card: Rect) -> f32 {
+    card.left() + CARD_TEXT_LEFT
+}
+
+fn card_right_edge(card: Rect) -> f32 {
+    card.right() - CARD_EDGE
+}
+
+/// Width left for the name/detail column: the reading column and an 8px gap are reserved first.
+fn card_text_width(card: Rect, reading_width: f32) -> f32 {
+    (card_right_edge(card) - reading_width - CARD_COLUMN_GAP - card_text_left(card)).max(16.0)
+}
+
+/// How much of the device detail the name column can afford at the current width.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DetailDensity {
+    Full,
+    Compact,
+    Minimal,
+}
+
+impl DetailDensity {
+    /// 150px fits transport, age and source; 100px drops the age; below that only the
+    /// state words survive, so a status can never be elided away by a narrow window.
+    pub fn for_text_width(text_width: f32) -> Self {
+        if text_width >= 150.0 {
+            Self::Full
+        } else if text_width >= 100.0 {
+            Self::Compact
+        } else {
+            Self::Minimal
+        }
+    }
+}
 
 /// Width of the largest three-digit percentage at the reading size, so a 100% label
 /// never jumps the column wider while a device changes.
@@ -283,7 +427,7 @@ fn percent_text_width(ui: &Ui, level: u8) -> f32 {
     ui.painter()
         .layout_no_wrap(
             sample.to_owned(),
-            FontId::new(24.0, FontFamily::Name("bold".into())),
+            FontId::new(22.0, FontFamily::Name("bold".into())),
             Color32::WHITE,
         )
         .size()
@@ -340,24 +484,72 @@ fn device_tooltip(ui: &mut Ui, p: &Palette, device: &DeviceSnapshot, now: u64) {
     }
 }
 
-fn device_detail(device: &DeviceSnapshot, now: u64) -> String {
+fn device_detail(device: &DeviceSnapshot, now: u64, density: DetailDensity) -> String {
     let transport = device.transport.label_zh();
     let age = age_text(device.updated_at_unix, now);
     let source = device.source.verification.label_zh();
+    // Priority: abnormal state or unmatched protocol, charging, unverified source, transport,
+    // age, source. Density only decides how much of that tail survives.
+    let with_transport = |state: &'static str| -> String {
+        // The abnormal state leads: it is the one word that must survive truncation.
+        match density {
+            DetailDensity::Full => format!("{} / {} / {}", state, transport, age),
+            DetailDensity::Compact => format!("{} / {}", state, transport),
+            DetailDensity::Minimal => state.to_owned(),
+        }
+    };
     match device.status {
-        BatteryStatus::Unsupported => "已连接 / 未匹配电量协议".to_owned(),
-        BatteryStatus::Asleep => format!("{} / {} / 休眠", transport, age),
-        BatteryStatus::Stale => format!("{} / {} / 可能不准", transport, age),
-        BatteryStatus::Error => format!("{} / 读取失败", transport),
-        BatteryStatus::Unknown => format!("{} / 等待数据", transport),
-        _ => {
-            if device.battery.charging() == Some(true) {
-                format!("{} / 充电中 / {}", transport, source)
-            } else {
-                format!("{} / {} / {}", transport, age, source)
+        BatteryStatus::Unsupported => match density {
+            DetailDensity::Minimal => "未匹配协议".to_owned(),
+            _ => "已连接 / 未匹配电量协议".to_owned(),
+        },
+        BatteryStatus::Asleep => with_transport("休眠"),
+        BatteryStatus::Stale => with_transport("可能不准"),
+        BatteryStatus::Error => with_transport("读取失败"),
+        BatteryStatus::Unknown => with_transport("等待数据"),
+        BatteryStatus::Available | BatteryStatus::Charging | BatteryStatus::Full => {
+            let charging = device.battery.charging() == Some(true);
+            let unverified = device.source.verification == Confidence::Unverified;
+            let mut parts: Vec<&str> = Vec::new();
+            if charging {
+                parts.push("充电中");
             }
+            // Must never be cut: it says the reading is a guess.
+            if unverified {
+                parts.push("未验证");
+            }
+            parts.push(transport);
+            match density {
+                DetailDensity::Full => {
+                    parts.push(&age);
+                    if !unverified {
+                        parts.push(source);
+                    }
+                }
+                DetailDensity::Compact => {
+                    if !unverified {
+                        parts.push(source);
+                    }
+                }
+                DetailDensity::Minimal => {}
+            }
+            parts.join(" / ")
         }
     }
+}
+
+/// Cell rectangles for the pixel battery bars. Both bar styles use it, so the 8-cell
+/// percentage bar and the 3-cell coarse bar cannot drift apart.
+fn cell_rects(rect: Rect, cells: usize, gap: f32) -> Vec<Rect> {
+    let cell_width = (rect.width() - gap * cells.saturating_sub(1) as f32) / cells as f32;
+    (0..cells)
+        .map(|index| {
+            Rect::from_min_size(
+                Pos2::new(rect.left() + index as f32 * (cell_width + gap), rect.top()),
+                vec2(cell_width, rect.height()),
+            )
+        })
+        .collect()
 }
 
 pub(crate) fn pixel_battery(
@@ -367,15 +559,13 @@ pub(crate) fn pixel_battery(
     fill: f32,
     color: Color32,
 ) {
-    let cells = 8;
-    let gap = 1.5;
-    let cell_width = (rect.width() - gap * (cells as f32 - 1.0)) / cells as f32;
-    let filled = (fill.clamp(0.0, 1.0) * cells as f32).ceil() as usize;
-    for i in 0..cells {
-        let x = rect.left() + i as f32 * (cell_width + gap);
-        let cell = Rect::from_min_size(Pos2::new(x, rect.top()), vec2(cell_width, rect.height()));
+    let filled = (fill.clamp(0.0, 1.0) * PERCENT_CELLS as f32).ceil() as usize;
+    for (index, cell) in cell_rects(rect, PERCENT_CELLS, PERCENT_CELL_GAP)
+        .into_iter()
+        .enumerate()
+    {
         let cell = theme::snap_rect(painter.ctx().pixels_per_point(), cell);
-        let fill = if i < filled { color } else { p.track };
+        let fill = if index < filled { color } else { p.track };
         painter.rect_filled(cell, CornerRadius::ZERO, fill);
         painter.rect_stroke(
             cell,
@@ -394,22 +584,20 @@ pub(crate) fn coarse_pixel_battery(
     rect: Rect,
     level: CoarseLevel,
 ) {
-    let cells = 3;
-    let gap = 2.0;
     let filled = match level {
         CoarseLevel::Low => 1,
         CoarseLevel::Medium => 2,
         CoarseLevel::Full => 3,
     };
-    let cell_width = (rect.width() - gap * (cells as f32 - 1.0)) / cells as f32;
-    for i in 0..cells {
-        let x = rect.left() + i as f32 * (cell_width + gap);
-        let cell = Rect::from_min_size(Pos2::new(x, rect.top()), vec2(cell_width, rect.height()));
+    for (index, cell) in cell_rects(rect, COARSE_CELLS, COARSE_CELL_GAP)
+        .into_iter()
+        .enumerate()
+    {
         let cell = theme::snap_rect(painter.ctx().pixels_per_point(), cell);
         painter.rect_filled(
             cell,
             CornerRadius::ZERO,
-            if i < filled { p.secondary } else { p.track },
+            if index < filled { p.secondary } else { p.track },
         );
         painter.rect_stroke(
             cell,
@@ -925,18 +1113,21 @@ pub fn footer(
     scanning: bool,
 ) -> Response {
     let width = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(vec2(width, 40.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 32.0), Sense::hover());
     let painter = ui.painter();
-    painter.line_segment(
-        [
-            Pos2::new(rect.left(), rect.top() + 1.0),
-            Pos2::new(rect.right(), rect.top() + 1.0),
-        ],
-        Stroke::new(2.0, p.card_border),
-    );
+    // 1px dotted seam (2px dash, 2px gap): a printed divider, not a heavy rule.
+    let mut x = rect.left();
+    while x < rect.right() {
+        painter.rect_filled(
+            Rect::from_min_size(Pos2::new(x, rect.top() + 1.0), vec2(2.0, 1.0)),
+            CornerRadius::ZERO,
+            p.track,
+        );
+        x += 4.0;
+    }
     let button_rect = Rect::from_min_size(
-        Pos2::new(rect.right() - 74.0, rect.center().y - 14.0),
-        vec2(74.0, 28.0),
+        Pos2::new(rect.right() - 64.0, rect.center().y - 14.0),
+        vec2(64.0, 28.0),
     );
     let text_width = (button_rect.left() - (rect.left() + 2.0) - 10.0).max(40.0);
     painter.text(
@@ -1075,6 +1266,254 @@ mod titlebar_tests {
                     "drag area overlaps a caption button at {width}"
                 );
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod card_tests {
+    use super::*;
+    use anybattery_core::{BatterySource, DeviceId, DeviceKind, Transport};
+
+    fn card(width: f32) -> Rect {
+        Rect::from_min_size(Pos2::new(20.0, 40.0), vec2(width, CARD_HEIGHT))
+    }
+
+    fn snapshot(
+        status: BatteryStatus,
+        battery: BatteryReading,
+        verification: Confidence,
+    ) -> DeviceSnapshot {
+        let mut device = DeviceSnapshot::new(
+            DeviceId::new("test", "设备"),
+            "设备",
+            DeviceKind::Mouse,
+            Transport::Usb24g,
+            BatterySource::new("test", verification, ""),
+        );
+        device.status = status;
+        device.battery = battery;
+        device.updated_at_unix = Some(1_000);
+        device
+    }
+
+    /// Runs the closure inside a real frame so text measurement uses the installed pixel font.
+    fn measured(f: impl Fn(&Ui) -> Vec<f32>) -> Vec<f32> {
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        let out = std::cell::RefCell::new(Vec::new());
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            *out.borrow_mut() = f(ui);
+        });
+        output.textures_delta.clear();
+        out.into_inner()
+    }
+
+    #[test]
+    fn card_elements_fit_the_68px_card() {
+        assert_eq!(CARD_HEIGHT, 68.0);
+        for width in [296.0, 368.0] {
+            let card = card(width);
+            let icon = card_icon_rect(card);
+            assert_eq!((icon.width(), icon.height()), (32.0, 32.0));
+            assert_eq!(icon.min, Pos2::new(card.left() + 10.0, card.top() + 10.0));
+            let badge = card_badge_rect(card);
+            assert_eq!((badge.width(), badge.height()), (30.0, 12.0));
+            let bar = card_bar_rect(card);
+            assert_eq!((bar.width(), bar.height()), (54.0, BAR_HEIGHT));
+            for element in [icon, badge, bar] {
+                assert!(
+                    card.contains_rect(element),
+                    "element outside the card at {width}: {element:?}"
+                );
+            }
+            // The right column hugs the card inset; the text column keeps its 8px gap.
+            assert_eq!(bar.right(), card.right() - 10.0);
+            assert!(card_text_left(card) + card_text_width(card, BAR_WIDTH) <= bar.left() - 8.0);
+            // Icon block and status badge both stay left of the text column.
+            assert!(icon.right() < card_text_left(card));
+            assert!(badge.right() < card_text_left(card));
+            // 12px text is 8px from its centre, so both rows still sit inside 68px.
+            assert!(card_name_y(card) + 8.0 <= card.bottom());
+            assert!(card_detail_y(card) + 8.0 <= card.bottom());
+            assert!(bar.bottom() + 8.0 <= card.bottom());
+        }
+    }
+
+    #[test]
+    fn percent_column_width_is_stable_and_fits_three_digits() {
+        let values = measured(|ui| {
+            let rendered = ui
+                .painter()
+                .layout_no_wrap(
+                    "100%".to_owned(),
+                    FontId::new(22.0, FontFamily::Name("bold".into())),
+                    Color32::WHITE,
+                )
+                .size()
+                .x;
+            vec![
+                percent_text_width(ui, 8),
+                percent_text_width(ui, 88),
+                percent_text_width(ui, 100),
+                rendered,
+            ]
+        });
+        let (two_digit, same_two_digit, three_digit, rendered) =
+            (values[0], values[1], values[2], values[3]);
+        assert_eq!(
+            two_digit, same_two_digit,
+            "the two-digit column must not jump between levels"
+        );
+        assert!(
+            three_digit > two_digit,
+            "100% must reserve a wider cell ({three_digit} vs {two_digit})"
+        );
+        assert!(
+            three_digit >= rendered,
+            "100% must not be truncated ({three_digit} < {rendered})"
+        );
+    }
+
+    #[test]
+    fn detail_density_switches_at_150_and_100() {
+        assert_eq!(DetailDensity::for_text_width(99.0), DetailDensity::Minimal);
+        assert_eq!(DetailDensity::for_text_width(100.0), DetailDensity::Compact);
+        assert_eq!(DetailDensity::for_text_width(149.0), DetailDensity::Compact);
+        assert_eq!(DetailDensity::for_text_width(150.0), DetailDensity::Full);
+    }
+
+    #[test]
+    fn unverified_stays_visible_at_minimal_density() {
+        let device = snapshot(
+            BatteryStatus::Charging,
+            BatteryReading::percent(40, Some(true)),
+            Confidence::Unverified,
+        );
+        let detail = device_detail(&device, 1_000, DetailDensity::Minimal);
+        assert!(detail.contains("未验证"), "{detail}");
+        let parts: Vec<&str> = detail.split(" / ").collect();
+        assert_eq!(parts[0], "充电中");
+        assert_eq!(parts[1], "未验证");
+        assert!(!detail.contains("  "), "empty fragment in {detail}");
+    }
+
+    #[test]
+    fn unsupported_minimal_shortens_the_protocol_note() {
+        let device = snapshot(
+            BatteryStatus::Unsupported,
+            BatteryReading::Unknown,
+            Confidence::Unverified,
+        );
+        assert_eq!(
+            device_detail(&device, 1_000, DetailDensity::Minimal),
+            "未匹配协议"
+        );
+        assert_eq!(
+            device_detail(&device, 1_000, DetailDensity::Compact),
+            "已连接 / 未匹配电量协议"
+        );
+    }
+
+    #[test]
+    fn abnormal_state_leads_the_detail_at_every_density() {
+        let device = snapshot(
+            BatteryStatus::Asleep,
+            BatteryReading::percent(30, None),
+            Confidence::Verified,
+        );
+        for density in [
+            DetailDensity::Full,
+            DetailDensity::Compact,
+            DetailDensity::Minimal,
+        ] {
+            let detail = device_detail(&device, 1_000, density);
+            assert!(detail.starts_with("休眠"), "{density:?}: {detail}");
+        }
+    }
+
+    #[test]
+    fn charging_leads_the_compact_detail() {
+        let device = snapshot(
+            BatteryStatus::Charging,
+            BatteryReading::percent(90, Some(true)),
+            Confidence::Verified,
+        );
+        let detail = device_detail(&device, 1_000, DetailDensity::Compact);
+        assert!(detail.starts_with("充电中"), "{detail}");
+        assert!(detail.contains("2.4G"), "{detail}");
+        assert_eq!(detail.matches("已验证").count(), 1, "{detail}");
+    }
+
+    #[test]
+    fn nine_choices_fit_one_row_in_a_320px_window() {
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        let p = theme::palette(false);
+        let rects = std::cell::RefCell::new(Vec::new());
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            // 320px window: 296px page content, then the group border and padding take 12px.
+            ui.set_width(296.0);
+            group(ui, &p, |ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.horizontal(|ui| {
+                    let mut collect = |response: Response| rects.borrow_mut().push(response.rect);
+                    collect(text_choice_button(ui, &p, "自动", false));
+                    for kind in [
+                        anybattery_core::DeviceKind::Mouse,
+                        anybattery_core::DeviceKind::Keyboard,
+                        anybattery_core::DeviceKind::Headset,
+                        anybattery_core::DeviceKind::Earbuds,
+                        anybattery_core::DeviceKind::Speaker,
+                        anybattery_core::DeviceKind::Controller,
+                        anybattery_core::DeviceKind::Pen,
+                        anybattery_core::DeviceKind::Unknown,
+                    ] {
+                        collect(device_icon_button(ui, &p, kind, false));
+                    }
+                });
+            });
+        });
+        output.textures_delta.clear();
+
+        let rects = rects.into_inner();
+        assert_eq!(rects.len(), 9);
+        for rect in &rects {
+            assert_eq!((rect.width(), rect.height()), (CHOICE_SIZE, CHOICE_SIZE));
+            assert_eq!(
+                rect.center().y,
+                rects[0].center().y,
+                "choice wrapped to a new row"
+            );
+        }
+        let span = rects[8].right() - rects[0].left();
+        assert!(
+            (span - 284.0).abs() < 0.01,
+            "row spans {span}px, expected 284"
+        );
+        // Everything stays inside the group content box (296 - 2px border - 4px padding).
+        assert!(rects[8].right() <= rects[0].left() + 284.0 + 0.01);
+    }
+
+    #[test]
+    fn battery_bars_keep_their_cell_counts() {
+        let bar = card_bar_rect(card(296.0));
+        let percent_cells = cell_rects(bar, PERCENT_CELLS, PERCENT_CELL_GAP);
+        assert_eq!(percent_cells.len(), 8);
+        let coarse_cells = cell_rects(bar, COARSE_CELLS, COARSE_CELL_GAP);
+        assert_eq!(coarse_cells.len(), 3);
+        for (cells, gap) in [
+            (&percent_cells, PERCENT_CELL_GAP),
+            (&coarse_cells, COARSE_CELL_GAP),
+        ] {
+            for (index, cell) in cells.iter().enumerate() {
+                assert!(bar.contains_rect(*cell), "cell outside the bar: {cell:?}");
+                if index > 0 {
+                    let gap_seen = cell.left() - cells[index - 1].right();
+                    assert!((gap_seen - gap).abs() < 0.01, "gap {gap_seen} != {gap}");
+                }
+            }
+            assert!((cells[cells.len() - 1].right() - bar.right()).abs() < 0.01);
         }
     }
 }

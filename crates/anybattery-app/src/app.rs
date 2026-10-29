@@ -68,7 +68,10 @@ impl Filter {
 }
 const SCAN_STALL_TIMEOUT: Duration = Duration::from_secs(20);
 /// 展开的图标选择器在设备列表里占用的高度，用于滚动区域预留。
-const ICON_PICKER_HEIGHT: f32 = 104.0;
+const ICON_PICKER_HEIGHT: f32 = 72.0;
+/// Inline icon picker geometry: nine 28px choices with 4px gaps are exactly 284px.
+const ICON_CHOICE_SIZE: f32 = widgets::CHOICE_SIZE;
+const ICON_CHOICE_GAP: f32 = 4.0;
 
 const DEVICE_ICON_CHOICES: [DeviceKind; 8] = [
     DeviceKind::Mouse,
@@ -1087,23 +1090,65 @@ impl AnyBatteryApp {
         if self.settings.notify_low_battery {
             if let Some(alert) = &self.alert {
                 let width = ui.available_width();
-                let (rect, _) = ui.allocate_exact_size(vec2(width, 34.0), Sense::hover());
-                icons::pixel_frame(ui.painter(), rect, p.warning_bg, p.card_border);
-                ui.painter().rect_filled(
+                let text_left = 24.0;
+                let text_width = (width - text_left - 8.0).max(60.0);
+                // Narrow windows get a second row instead of losing the percentage: the name
+                // wraps or elides on row one, the level and its advice always keep row two.
+                let (head, tail) = split_alert(alert);
+                let single =
+                    widgets::wrapped_galley(ui, alert, 12.0, true, text_width, 1, p.warning_text);
+                let two_rows = single.elided;
+                let height = if two_rows { 40.0 } else { 30.0 };
+                let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
+                let painter = ui.painter();
+                icons::pixel_frame(painter, rect, p.warning_bg, p.card_border);
+                painter.rect_filled(
                     Rect::from_min_size(
-                        Pos2::new(rect.left() + 10.0, rect.center().y - 6.0),
-                        vec2(12.0, 12.0),
+                        Pos2::new(rect.left() + 8.0, rect.center().y - 5.0),
+                        vec2(10.0, 10.0),
                     ),
                     CornerRadius::ZERO,
                     p.accent,
                 );
-                ui.painter().text(
-                    Pos2::new(rect.left() + 30.0, rect.center().y),
-                    Align2::LEFT_CENTER,
-                    widgets::fit_text(ui, alert, 12.0, true, ui.available_width() - 40.0),
-                    FontId::new(12.0, egui::FontFamily::Name("bold".into())),
-                    p.warning_text,
-                );
+                if two_rows {
+                    let head = widgets::wrapped_galley(
+                        ui,
+                        head,
+                        12.0,
+                        true,
+                        text_width,
+                        1,
+                        p.warning_text,
+                    );
+                    let tail = widgets::wrapped_galley(
+                        ui,
+                        tail,
+                        12.0,
+                        true,
+                        text_width,
+                        1,
+                        p.warning_text,
+                    );
+                    painter.galley(
+                        Pos2::new(rect.left() + text_left, rect.top() + 6.0),
+                        head,
+                        p.warning_text,
+                    );
+                    painter.galley(
+                        Pos2::new(rect.left() + text_left, rect.top() + 22.0),
+                        tail,
+                        p.warning_text,
+                    );
+                } else {
+                    painter.galley(
+                        Pos2::new(
+                            rect.left() + text_left,
+                            rect.center().y - single.size().y / 2.0,
+                        ),
+                        single,
+                        p.warning_text,
+                    );
+                }
                 ui.add_space(8.0);
             }
         }
@@ -1139,9 +1184,9 @@ impl AnyBatteryApp {
             .icon_picker_for
             .as_deref()
             .is_some_and(|id| filtered.iter().any(|device| device.id.0.as_str() == id));
-        let content_height = filtered.len() as f32 * (widgets::CARD_HEIGHT + 8.0)
+        let content_height = filtered.len() as f32 * (widgets::CARD_HEIGHT + widgets::CARD_GAP)
             + if picker_open {
-                ICON_PICKER_HEIGHT + 8.0
+                ICON_PICKER_HEIGHT + widgets::CARD_GAP
             } else {
                 0.0
             }
@@ -1184,7 +1229,7 @@ impl AnyBatteryApp {
                                 };
                         }
                         response.on_hover_text("点击选择设备图标");
-                        ui.add_space(8.0);
+                        ui.add_space(widgets::CARD_GAP);
                         if self.icon_picker_for.as_deref() == Some(device.id.0.as_str()) {
                             let auto = self
                                 .devices
@@ -1193,7 +1238,7 @@ impl AnyBatteryApp {
                                 .map(|original| original.kind)
                                 .unwrap_or(device.kind);
                             self.icon_picker(ui, p, device, auto);
-                            ui.add_space(8.0);
+                            ui.add_space(widgets::CARD_GAP);
                         }
                     }
                 }
@@ -1219,31 +1264,39 @@ impl AnyBatteryApp {
     fn icon_picker(&mut self, ui: &mut Ui, p: &Palette, device: &DeviceSnapshot, auto: DeviceKind) {
         let id = device.id.0.clone();
         let current = self.settings.icon_overrides.get(&id).copied();
-        let effective = current.unwrap_or(auto);
         let mut close = false;
+        let mut choice: Option<Option<DeviceKind>> = None;
 
         widgets::group(ui, p, |ui| {
+            // Two 28px rows with the same 4px gap: 12 + 28 + 4 + 28 == ICON_PICKER_HEIGHT.
+            ui.spacing_mut().item_spacing.y = ICON_CHOICE_GAP;
             ui.horizontal(|ui| {
-                widgets::device_icon_tile(ui, p, effective);
-                ui.add_space(8.0);
-                ui.vertical(|ui| {
-                    ui.label(theme::rich("选择设备图标", 11.5, p.text, true));
-                    let detail = match current {
-                        Some(kind) => format!("手动：{}", kind.label_zh()),
-                        None => format!("自动：{}", auto.label_zh()),
-                    };
-                    ui.label(theme::rich(detail, 10.0, p.tertiary, false));
-                });
+                let detail = match current {
+                    Some(kind) => format!("图标 · 手动：{}", kind.label_zh()),
+                    None => format!("图标 · 自动：{}", auto.label_zh()),
+                };
+                let max_width =
+                    (ui.available_width() - ICON_CHOICE_SIZE - ICON_CHOICE_GAP).max(40.0);
+                ui.label(theme::rich(
+                    widgets::fit_text(ui, &detail, 11.5, true, max_width),
+                    11.5,
+                    p.text,
+                    true,
+                ));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if widgets::pill_button(ui, p, "收起", false).clicked() {
+                    if widgets::text_choice_button(ui, p, "收起", false).clicked() {
                         close = true;
                     }
                 });
             });
-
-            let mut choice: Option<Option<DeviceKind>> = None;
-            ui.horizontal_wrapped(|ui| {
-                if widgets::pill_button(ui, p, "自动", current.is_none()).clicked() {
+            ui.horizontal(|ui| {
+                // Explicit 4px spacing: 9*28 + 8*4 = 284, the exact inner width at 320px.
+                ui.spacing_mut().item_spacing.x = ICON_CHOICE_GAP;
+                let auto_button = widgets::text_choice_button(ui, p, "自动", current.is_none())
+                    .on_hover_text(
+                        "自动按产品名与协议识别；无法判断时选一个最接近的内置像素图标。",
+                    );
+                if auto_button.clicked() {
                     choice = Some(None);
                 }
                 for kind in DEVICE_ICON_CHOICES {
@@ -1252,26 +1305,20 @@ impl AnyBatteryApp {
                     }
                 }
             });
-            if let Some(choice) = choice {
-                match choice {
-                    Some(kind) => {
-                        self.settings.icon_overrides.insert(id, kind);
-                    }
-                    None => {
-                        self.settings.icon_overrides.remove(&id);
-                    }
-                }
-                self.save_settings();
-                self.update_counts();
-            }
-            ui.label(theme::rich(
-                "自动按产品名与协议识别；无法判断时选一个最接近的内置像素图标。",
-                9.5,
-                p.tertiary,
-                false,
-            ));
         });
 
+        if let Some(choice) = choice {
+            match choice {
+                Some(kind) => {
+                    self.settings.icon_overrides.insert(id, kind);
+                }
+                None => {
+                    self.settings.icon_overrides.remove(&id);
+                }
+            }
+            self.save_settings();
+            self.update_counts();
+        }
         if close {
             self.icon_picker_for = None;
         }
@@ -1576,20 +1623,22 @@ impl AnyBatteryApp {
             1.0
         };
         let rect = ui.max_rect();
-        let text = widgets::fit_text(ui, message, 12.0, false, rect.width() - 76.0);
-        let text_width = ui
-            .painter()
-            .layout_no_wrap(
-                text.clone(),
-                FontId::new(12.0, egui::FontFamily::Proportional),
-                p.text,
-            )
-            .size()
-            .x;
-        let width = (text_width + 32.0).min(rect.width() - 60.0).max(120.0);
+        // A 320px window only leaves a narrow strip: allow two rows and elide, never overflow.
+        let max_text_width = (rect.width() - 60.0 - 32.0).max(60.0);
+        let galley = widgets::wrapped_galley(
+            ui,
+            message,
+            12.0,
+            false,
+            max_text_width,
+            2,
+            p.text.gamma_multiply(shown),
+        );
+        let width = (galley.size().x + 32.0).min(rect.width() - 60.0).max(120.0);
+        let height = if galley.rows.len() > 1 { 44.0 } else { 30.0 };
         let toast = Rect::from_center_size(
-            Pos2::new(rect.center().x, rect.bottom() - 58.0 + (1.0 - shown) * 6.0),
-            vec2(width, 32.0),
+            Pos2::new(rect.center().x, rect.bottom() - 52.0 + (1.0 - shown) * 6.0),
+            vec2(width, height),
         );
         icons::draw_pixel_shadow(ui.painter(), toast, p.shadow.gamma_multiply(shown));
         icons::pixel_frame(
@@ -1598,11 +1647,13 @@ impl AnyBatteryApp {
             p.card_solid.gamma_multiply(shown),
             p.card_border.gamma_multiply(shown),
         );
-        ui.painter().text(
-            toast.center(),
-            Align2::CENTER_CENTER,
-            text,
-            FontId::new(12.0, egui::FontFamily::Proportional),
+        let galley_size = galley.size();
+        ui.painter().galley(
+            Pos2::new(
+                toast.center().x - galley_size.x / 2.0,
+                toast.center().y - galley_size.y / 2.0,
+            ),
+            galley,
             p.text.gamma_multiply(shown),
         );
     }
@@ -1754,6 +1805,25 @@ fn merge_device_list(devices: &mut Vec<DeviceSnapshot>, partial: Vec<DeviceSnaps
     sort_devices_for_display(devices);
 }
 
+/// Available content width for the inline icon picker: window width minus the page margins,
+/// the group 2px border and its 4px inner padding on both sides. Test-only: it exists so the
+/// 284px budget is checked as pure arithmetic instead of by eye.
+#[cfg(test)]
+fn icon_picker_inner_width(window_width: f32) -> f32 {
+    let metrics = theme::layout_metrics(window_width);
+    let content = window_width - metrics.margin_x * 2.0;
+    content - 2.0 * (2.0 + 4.0)
+}
+
+/// Split a low-battery alert so a narrow banner can keep the device name on row one and the
+/// level with its advice on row two. The level text is never elided away.
+fn split_alert(alert: &str) -> (&str, &str) {
+    match alert.find("电量低") {
+        Some(index) if index > 0 => alert.split_at(index),
+        _ => (alert, ""),
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EmptyState {
     Scanning,
@@ -1765,19 +1835,19 @@ enum EmptyState {
 /// leave the current filter, so the caller can switch back to "全部".
 fn empty_state(ui: &mut Ui, p: &Palette, empty: EmptyState) -> bool {
     let mut show_all = false;
-    ui.add_space(48.0);
+    ui.add_space(24.0);
     ui.vertical_centered(|ui| {
-        let (rect, _) = ui.allocate_exact_size(vec2(64.0, 64.0), Sense::hover());
+        let (rect, _) = ui.allocate_exact_size(vec2(48.0, 48.0), Sense::hover());
         icons::draw_pixel_shadow(ui.painter(), rect, p.shadow);
         icons::pixel_frame(ui.painter(), rect, p.card, p.card_border);
         ui.painter().text(
             rect.center(),
             Align2::CENTER_CENTER,
             "?",
-            FontId::new(30.0, egui::FontFamily::Name("bold".into())),
+            FontId::new(24.0, egui::FontFamily::Name("bold".into())),
             p.tertiary,
         );
-        ui.add_space(14.0);
+        ui.add_space(10.0);
         let (title, hint) = match empty {
             EmptyState::Scanning => (
                 "正在扫描设备…",
@@ -1792,7 +1862,7 @@ fn empty_state(ui: &mut Ui, p: &Palette, empty: EmptyState) -> bool {
                 "当前筛选下没有设备，其他分类仍可能有数据",
             ),
         };
-        ui.label(theme::rich(title, 18.0, p.text, true));
+        ui.label(theme::rich(title, 16.0, p.text, true));
         ui.add_space(4.0);
         ui.label(theme::rich(hint, 12.0, p.secondary, false));
         if empty == EmptyState::Filtered {
@@ -1879,5 +1949,39 @@ mod tests {
         ];
         sort_devices_for_display(&mut devices);
         assert_eq!(names(&devices), ["One", "Ninety", "Unknown", "Coarse Low"]);
+    }
+
+    #[test]
+    fn icon_picker_row_fits_the_narrowest_window() {
+        assert_eq!(ICON_CHOICE_SIZE, 28.0);
+        assert_eq!(ICON_CHOICE_GAP, 4.0);
+        let needed = ICON_CHOICE_SIZE * 9.0 + ICON_CHOICE_GAP * 8.0;
+        assert_eq!(needed, 284.0);
+        // At 320px the page content is 296px; border and padding take 12px of that.
+        assert_eq!(icon_picker_inner_width(320.0), 284.0);
+        for width in [320.0, 360.0, 400.0, 430.0] {
+            let inner = icon_picker_inner_width(width);
+            assert!(
+                inner >= needed,
+                "picker row {needed}px does not fit {inner}px at {width}px"
+            );
+        }
+        // Two 28px rows, one 4px gap and 12px of group border plus padding.
+        assert_eq!(
+            ICON_PICKER_HEIGHT,
+            ICON_CHOICE_SIZE * 2.0 + ICON_CHOICE_GAP + 12.0
+        );
+    }
+
+    #[test]
+    fn banner_split_keeps_the_level_on_its_own_row() {
+        let (head, tail) = split_alert("8BitDo 手柄 电量低（15%），建议充电");
+        assert_eq!(head, "8BitDo 手柄 ");
+        assert!(tail.starts_with("电量低"), "{tail}");
+        assert!(tail.contains("15%"), "{tail}");
+        // Nothing to split: the whole message stays on the first row.
+        let (head, tail) = split_alert("自定义提示");
+        assert_eq!(head, "自定义提示");
+        assert_eq!(tail, "");
     }
 }
