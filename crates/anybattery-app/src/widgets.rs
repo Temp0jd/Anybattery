@@ -129,8 +129,11 @@ pub fn device_icon_tile(ui: &mut Ui, p: &Palette, kind: anybattery_core::DeviceK
 
 pub fn device_card(ui: &mut Ui, p: &Palette, device: &DeviceSnapshot, now: u64) -> Response {
     let width = ui.available_width();
-    let (rect, response) = ui.allocate_exact_size(vec2(width, CARD_HEIGHT), Sense::hover());
+    let (rect, response) = ui.allocate_exact_size(vec2(width, CARD_HEIGHT), Sense::click());
     let rect = theme::snap_rect(ui.ctx().pixels_per_point(), rect);
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
     let hover = ui.ctx().animate_bool(response.id, response.hovered());
     let painter = ui.painter();
 

@@ -67,6 +67,8 @@ impl Filter {
     }
 }
 const SCAN_STALL_TIMEOUT: Duration = Duration::from_secs(20);
+/// 展开的图标选择器在设备列表里占用的高度，用于滚动区域预留。
+const ICON_PICKER_HEIGHT: f32 = 104.0;
 
 const DEVICE_ICON_CHOICES: [DeviceKind; 8] = [
     DeviceKind::Mouse,
@@ -181,6 +183,8 @@ pub struct AnyBatteryApp {
     profile_diagnostics: Vec<String>,
     hid_interfaces: Vec<HidInterface>,
     wizard: ProtocolWizard,
+    /// Main-page card whose inline icon picker is currently open.
+    icon_picker_for: Option<String>,
 }
 impl AnyBatteryApp {
     pub fn new(
@@ -238,6 +242,7 @@ impl AnyBatteryApp {
             profile_diagnostics,
             hid_interfaces: Vec::new(),
             wizard: ProtocolWizard::new(),
+            icon_picker_for: None,
         };
         // The initial scan request is the first thing the worker thread receives.
         app.start_scan();
@@ -1095,9 +1100,17 @@ impl AnyBatteryApp {
             widgets::segment(ui, p, &labels, self.filter.index())
         {
             self.filter = Filter::from_index(index);
+            self.icon_picker_for = None;
         }
         ui.add_space(10.0);
         let now = now_unix();
+        // A device can disappear between scans; do not keep a picker anchored
+        // to an id that is no longer in the list.
+        if let Some(id) = &self.icon_picker_for {
+            if !self.devices.iter().any(|device| device.id.0 == *id) {
+                self.icon_picker_for = None;
+            }
+        }
         // Manual icon choices also drive the filter and header counts, so a
         // receiver the user reclassifies as a mouse moves to the right bucket.
         let mut visible = self.devices.clone();
@@ -1110,7 +1123,17 @@ impl AnyBatteryApp {
             .collect();
         // Reserve exactly what the cards need instead of the whole page. With few devices the
         // footer follows the last card; with many it stays outside a capped scroll area.
-        let content_height = filtered.len() as f32 * (widgets::CARD_HEIGHT + 8.0) + 4.0;
+        let picker_open = self
+            .icon_picker_for
+            .as_deref()
+            .is_some_and(|id| filtered.iter().any(|device| device.id.0.as_str() == id));
+        let content_height = filtered.len() as f32 * (widgets::CARD_HEIGHT + 8.0)
+            + if picker_open {
+                ICON_PICKER_HEIGHT + 8.0
+            } else {
+                0.0
+            }
+            + 4.0;
         let available = (ui.available_height() - 50.0).max(80.0);
         let list_height = if filtered.is_empty() {
             available
@@ -1138,8 +1161,28 @@ impl AnyBatteryApp {
                     }
                 } else {
                     for device in &filtered {
-                        widgets::device_card(ui, p, device, now);
+                        let response = widgets::device_card(ui, p, device, now);
+                        if response.clicked() {
+                            let id = device.id.0.clone();
+                            self.icon_picker_for =
+                                if self.icon_picker_for.as_deref() == Some(id.as_str()) {
+                                    None
+                                } else {
+                                    Some(id)
+                                };
+                        }
+                        response.on_hover_text("点击选择设备图标");
                         ui.add_space(8.0);
+                        if self.icon_picker_for.as_deref() == Some(device.id.0.as_str()) {
+                            let auto = self
+                                .devices
+                                .iter()
+                                .find(|original| original.id == device.id)
+                                .map(|original| original.kind)
+                                .unwrap_or(device.kind);
+                            self.icon_picker(ui, p, device, auto);
+                            ui.add_space(8.0);
+                        }
                     }
                 }
                 ui.add_space(4.0);
@@ -1160,56 +1203,29 @@ impl AnyBatteryApp {
             self.page = Page::Diagnostics;
         }
     }
-    fn icon_settings(&mut self, ui: &mut Ui, p: &Palette) {
-        if self.devices.is_empty() {
-            ui.label(theme::rich(
-                "完成一次扫描后，可在这里为设备指定图标。",
-                11.0,
-                p.secondary,
-                false,
-            ));
-            return;
-        }
-        if !self.settings.icon_overrides.is_empty() {
-            ui.horizontal(|ui| {
-                ui.label(theme::rich(
-                    format!("手动指定 {} 台", self.settings.icon_overrides.len()),
-                    10.5,
-                    p.tertiary,
-                    false,
-                ));
-                if widgets::pill_button(ui, p, "全部恢复自动", false).clicked() {
-                    self.settings.icon_overrides.clear();
-                    self.save_settings();
-                    self.update_counts();
-                }
-            });
-        }
+    /// 主页卡片下方展开的内联图标选择器；不打开设置页，也不改变列表顺序。
+    fn icon_picker(&mut self, ui: &mut Ui, p: &Palette, device: &DeviceSnapshot, auto: DeviceKind) {
+        let id = device.id.0.clone();
+        let current = self.settings.icon_overrides.get(&id).copied();
+        let effective = current.unwrap_or(auto);
+        let mut close = false;
 
-        let devices = self.devices.clone();
-        for device in devices {
-            let id = device.id.0.clone();
-            let auto = device.kind;
-            let current = self.settings.icon_overrides.get(&id).copied();
-            let effective = current.unwrap_or(auto);
-
-            ui.add_space(6.0);
+        widgets::group(ui, p, |ui| {
             ui.horizontal(|ui| {
                 widgets::device_icon_tile(ui, p, effective);
                 ui.add_space(8.0);
                 ui.vertical(|ui| {
-                    let width = (ui.available_width() - 8.0).max(80.0);
-                    ui.label(theme::rich(
-                        widgets::fit_text(ui, &device.name, 12.0, true, width),
-                        12.0,
-                        p.text,
-                        true,
-                    ));
+                    ui.label(theme::rich("选择设备图标", 11.5, p.text, true));
                     let detail = match current {
                         Some(kind) => format!("手动：{}", kind.label_zh()),
                         None => format!("自动：{}", auto.label_zh()),
                     };
                     ui.label(theme::rich(detail, 10.0, p.tertiary, false));
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if widgets::pill_button(ui, p, "收起", false).clicked() {
+                        close = true;
+                    }
                 });
             });
 
@@ -1236,14 +1252,17 @@ impl AnyBatteryApp {
                 self.save_settings();
                 self.update_counts();
             }
+            ui.label(theme::rich(
+                "自动按产品名与协议识别；无法判断时选一个最接近的内置像素图标。",
+                9.5,
+                p.tertiary,
+                false,
+            ));
+        });
+
+        if close {
+            self.icon_picker_for = None;
         }
-        ui.add_space(4.0);
-        ui.label(theme::rich(
-            "自动按产品名与协议识别；无法判断时选一个最接近的内置像素图标。",
-            10.0,
-            p.tertiary,
-            false,
-        ));
     }
     fn settings_page(&mut self, ui: &mut Ui, p: &Palette) {
         let available = ui.available_height() - 12.0;
@@ -1407,11 +1426,6 @@ impl AnyBatteryApp {
                         self.save_settings();
                         self.queue_rescan();
                     }
-                });
-                ui.add_space(14.0);
-                widgets::section_title(ui, p, "设备图标");
-                widgets::group(ui, p, |ui| {
-                    self.icon_settings(ui, p);
                 });
                 ui.add_space(14.0);
                 widgets::section_title(ui, p, "手动适配");
